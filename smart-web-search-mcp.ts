@@ -988,7 +988,8 @@ async function runL2L3(opts: {
 	if (includeArr.length > 0) tavilyParams.include_domains = includeArr;
 	if (excludeArr.length > 0) tavilyParams.exclude_domains = excludeArr;
 	if (hints.researchMode) tavilyParams.search_depth = "advanced";
-	if (hints.newsMode) tavilyParams.topic = "news";
+	// 注：tavily MCP 的 tavily_search 已把 topic 钉死为 const "general"（2026-10 实测），
+	// 传 topic:"news" 会 422 literal_error——不再映射 newsMode 到 topic。
 	if (opts.tryTavily && tavily && !l1Sufficient && !tinyfishSufficient) {
 		chain.push(await runLayer(2, "tavily", "tavily_search", tavilyParams,
 			() => tavily.callTool("tavily_search", tavilyParams), L3_TIMEOUT));

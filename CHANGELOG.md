@@ -6,6 +6,10 @@
 
 ## [0.2.0] — 2026-10-02
 
+### Fixed
+
+- **tavily L2 复活**：其一，旧 API key 已失效（vault 单源已更新）；其二，tavily MCP 的 `tavily_search` 已把 `topic` 钉死为 const `"general"`，核心不再映射 newsMode→`topic:"news"`（传了即 422 literal_error）。实测 extract 类查询 L2 tavily 正常接住。
+
 ### Changed（Breaking-ish）
 
 - **结果文本默认改为标签块格式**：不再把 provider 原始 JSON 作为结果文本返回，改为对 LLM 友好的 `[n] Title: / URL: / Published: / Source: / Snippet:` 块 + 一行路由页脚（`from L<n> <provider> | kept X of Y | dedup | layers | 耗时`），对齐 Exa/Tavily 官方 MCP 的输出形态；空结果回单句 `No results found (layers tried: …)`。
