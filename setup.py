@@ -28,6 +28,10 @@ def _find_dep(dep: str) -> Path | None:
         d = base / "node_modules" / dep
         if d.exists():
             return d
+    # 公开仓（smart-web-search-mcp）把 typebox vendor 在包目录，供 CI / 无仓构建
+    vendored = HERE / "src" / PKG / "node_modules" / dep
+    if vendored.exists():
+        return vendored
     return None
 
 
