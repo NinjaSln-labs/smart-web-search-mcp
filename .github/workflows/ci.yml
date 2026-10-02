@@ -23,6 +23,6 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install (editable)
-        run: pip install -e .
+        run: pip install -e . pytest
       - name: Verify (strip-only + pytest)
         run: python scripts/verify.py
