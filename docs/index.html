@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>smart-web-search-mcp 文档</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🔍%3C/text%3E%3C/svg%3E">
+  <!-- JSON-LD 结构化数据 — AI Agent 可读 -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "smart-web-search-mcp",
+    "url": "https://github.com/NinjaSln-labs/smart-web-search-mcp",
+    "downloadUrl": "https://pypi.org/project/smart-web-search-mcp/",
+    "softwareVersion": "0.1.0",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "Windows / macOS / Linux (Python >= 3.10, Node >= 22.7)",
+    "license": "https://github.com/NinjaSln-labs/smart-web-search-mcp/blob/main/LICENSE",
+    "description": "Smart Web Search MCP server：5-provider 融合搜索路由（wigolo+keenable → tinyfish→tavily → serper），一键安装器接入 10 家 AI agent",
+    "programmingLanguage": ["Python 3 (stdlib only)", "TypeScript (Node strip-only)"],
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "documentation": [
+      { "name": "AGENT-INDEX.json", "url": "https://ninjasln-labs.github.io/smart-web-search-mcp/AGENT-INDEX.json", "format": "json" },
+      { "name": "INSTALL.md", "url": "https://ninjasln-labs.github.io/smart-web-search-mcp/INSTALL.md", "format": "markdown" },
+      { "name": "MCP.md", "url": "https://ninjasln-labs.github.io/smart-web-search-mcp/MCP.md", "format": "markdown" },
+      { "name": "ROUTING.md", "url": "https://ninjasln-labs.github.io/smart-web-search-mcp/ROUTING.md", "format": "markdown" }
+    ]
+  }
+  </script>
+  <style>
+    :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff; --accent-hover: #79c0ff; --green: #3fb950; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); line-height: 1.7; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { color: var(--accent-hover); text-decoration: underline; }
+    a:not(.btn):not(.go):not(.badge) { text-decoration: underline; text-underline-offset: 2px; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+    .container { max-width: 960px; margin: 0 auto; padding: 24px 20px 60px; }
+    header.hero { text-align: center; padding: 48px 0 32px; }
+    h1.title { font-size: 2.4em; margin-bottom: 8px; }
+    .tagline { color: var(--muted); font-size: 1.05em; margin-bottom: 18px; }
+    .badges { display: flex; justify-content: center; flex-wrap: wrap; gap: 6px; }
+    .badge { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: .8em; border: 1px solid var(--border); color: var(--muted); background: var(--card); white-space: nowrap; }
+    .badge b { color: var(--text); font-weight: 600; }
+    .badge.green { border-color: #2ea043; color: #3fb950; }
+    .hero-actions { margin-top: 22px; }
+    .btn { display: inline-block; padding: 11px 23px; border-radius: 8px; font-weight: 600; margin: 4px; border: 1px solid var(--border); }
+    .btn.primary { background: #238636; border-color: #2ea043; color: #fff; }
+    .btn.primary:hover { background: #1f7f36; border-color: #3fb950; text-decoration: none; color: #fff; }
+    .btn.ghost:hover { border-color: var(--accent); text-decoration: none; }
+    /* 站内全文搜索 */
+    .search-bar { display: flex; gap: 8px; max-width: 620px; margin: 18px auto 0; }
+    .search-bar input[type="search"] { flex: 1; padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--text); font-size: .95em; }
+    .search-bar input[type="search"]::placeholder { color: var(--muted); }
+    #search-results { max-width: 620px; margin: 10px auto 0; text-align: left; font-size: .9em; }
+    #search-results .sr-head { color: var(--muted); margin-bottom: 6px; }
+    #search-results .sr-item { padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 6px; background: var(--card); }
+    #search-results .sr-item a { font-weight: 600; }
+    #search-results .sr-hit { color: var(--muted); font-size: .88em; margin-top: 2px; word-break: break-all; }
+    #search-results .sr-none, #search-results .sr-err { color: var(--muted); }
+    section { margin-top: 36px; }
+    h2.section-title { font-size: 1.4em; border-bottom: 1px solid var(--border); padding-bottom: 8px; margin-bottom: 18px; }
+    pre.code { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; overflow-x: auto; font-size: .92em; line-height: 1.55; }
+    code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+    p code, li code, td code { background: rgba(110,118,129,.25); color: var(--text); padding: 1px 6px; border-radius: 5px; font-size: .9em; }
+    pre.code code { background: none; padding: 0; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 14px; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 18px; }
+    .card h3 { font-size: 1.02em; margin-bottom: 6px; }
+    .card p { color: var(--muted); font-size: .92em; }
+    .card .go { display: inline-block; margin-top: 10px; font-size: .9em; }
+    table { width: 100%; border-collapse: collapse; font-size: .92em; margin: 10px 0; }
+    th, td { border: 1px solid var(--border); padding: 7px 10px; text-align: left; }
+    th { background: var(--card); }
+    .agent-note { background: rgba(88,166,255,.08); border: 1px solid rgba(88,166,255,.4); border-radius: 10px; padding: 14px 18px; font-size: .93em; }
+    .agent-note strong { color: var(--accent); }
+    footer { text-align: center; color: var(--muted); font-size: .85em; padding: 40px 0 10px; border-top: 1px solid var(--border); margin-top: 48px; }
+    /* markdown viewer */
+    #viewer { display: none; }
+    #viewer .md-body { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 28px 32px; }
+    #viewer h1, #viewer h2, #viewer h3 { border-bottom: 1px solid var(--border); padding-bottom: 6px; margin: 22px 0 12px; }
+    #viewer h1 { font-size: 1.5em; } #viewer h2 { font-size: 1.25em; } #viewer h3 { font-size: 1.1em; }
+    #viewer ul, #viewer ol { padding-left: 26px; margin: 8px 0; }
+    #viewer blockquote { border-left: 3px solid var(--accent); color: var(--muted); padding: 4px 14px; margin: 10px 0; }
+    #viewer table { margin: 12px 0; }
+    #viewer .md-body table { display: block; overflow-x: auto; }  /* 窄屏横向滚动 */
+    #viewer hr { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
+    .viewer-top { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+    .viewer-top .doc-crumb { color: var(--muted); font-size: .92em; margin-right: auto; }
+    .viewer-top .doc-crumb b { color: var(--text); }
+    .viewer-top a { flex-shrink: 0; }
+  </style>
+</head>
+<body>
+  <main class="container">
+    <div id="landing">
+      <header class="hero">
+        <h1 class="title">🔍 smart-web-search-mcp</h1>
+        <p class="tagline">5-provider 融合搜索路由 MCP server — 低成本层先答 · 付费层兜底 · 一键接入 10 家 AI agent<br>
+        5-provider fusion search routing for MCP — cheap layers first, paid layers as fallback.</p>
+        <div class="badges">
+          <span class="badge green"><b>PyPI</b> v0.1.0</span>
+          <span class="badge"><b>Python</b> 3.10+ · <b>Node</b> 22.7+</span>
+          <span class="badge green"><b>License</b> MIT</span>
+          <span class="badge"><b>依赖</b> Python 零依赖</span>
+        </div>
+        <div class="hero-actions">
+          <a class="btn primary" href="https://pypi.org/project/smart-web-search-mcp/">uv tool install smart-web-search-mcp</a>
+          <a class="btn ghost" href="https://github.com/NinjaSln-labs/smart-web-search-mcp">GitHub 仓库</a>
+        </div>
+        <div class="search-bar" role="search">
+          <input type="search" id="search-input" placeholder="搜索全部文档内容…" aria-label="搜索全部文档内容">
+          <button class="btn primary" id="search-btn" type="button">搜索</button>
+        </div>
+        <div id="search-results" role="status" aria-live="polite"></div>
+      </header>
+
+      <div class="agent-note">
+        <strong>🤖 AI Agent 入口</strong>：本站提供机器可读索引
+        <a href="AGENT-INDEX.json">AGENT-INDEX.json</a>（工具元数据 / 层级与凭据 / 配置路径）。
+        抓取 .md 原文请直接用 URL（如 <a href="INSTALL.md">INSTALL.md</a>）。
+      </div>
+
+      <section>
+        <h2 class="section-title">快速开始 / Quick Start</h2>
+<pre class="code" tabindex="0"><code># 安装（零 Python 依赖；MCP server 需 Node ≥ 22.7）
+uv tool install smart-web-search-mcp
+
+# 探测本机 agent（只读）→ 一键写入 MCP 配置（幂等）
+smart-web-search-install --list
+smart-web-search-install
+
+# 完成后 pi / Cursor / cline / opencode / zcode / Qoder / mcode
+# / commandcode / dsh / reasonix 里即出现 smart_web_search 工具</code></pre>
+      </section>
+
+      <section>
+        <h2 class="section-title">路由模型 / Routing</h2>
+<pre class="code" tabindex="0"><code>L1  wigolo (stdio, 18 引擎, 免费) + keenable (HTTP, 免费层)   并行
+L2  tinyfish (wallet 计费) → tavily (1000 次/月免费)           串行
+L3  serper (Google; 2500 一次性免费)                           无条件兜底
+
+每次调用返回完整 routing chain——LLM 可感知是哪一层接住的。</code></pre>
+      </section>
+
+      <section>
+        <h2 class="section-title">特性 / Features</h2>
+        <div class="grid">
+          <div class="card"><h3>🧭 梯次降级</h3><p>免费层并行打头，钱包层串行补位，付费层只兜底。LLM 只见 1 个工具，复杂度全在路由内。</p></div>
+          <div class="card"><h3>📦 零依赖</h3><p>安装器纯 Python 标准库；MCP 核心是 Node ≥22.7 strip-only 直跑的 TS——免 esbuild、免打包。</p></div>
+          <div class="card"><h3>🤝 一键接入 10 家 agent</h3><p>pi / Cursor / cline / opencode / zcode / Qoder / mcode / commandcode / dsh / reasonix；自动探测、幂等写入、覆盖前备份。</p></div>
+          <div class="card"><h3>🔁 spawn-per-call</h3><p>每次 tools/call 独立子进程跑完整搜索后退出——跨调用零状态累积，升级不失效。</p></div>
+          <div class="card"><h3>🪫 429 自感知</h3><p>keenable 公共层 429 自动落节流标记，60s 冷却内跳过，pi / CLI 双路一致。</p></div>
+          <div class="card"><h3>📊 可观测</h3><p>每次搜索的完整 chain 逐条落盘 JSONL（SMART_WS_LOG_RAW=0 可剥 raw_text），路由调优有据可依。</p></div>
+          <div class="card"><h3>🔑 凭据单源</h3><p>env / config 文件一处配置，各 agent 共享；无 key 时免费层开箱即用。</p></div>
+          <div class="card"><h3>🖥 跨平台</h3><p>Windows / macOS / Linux；双 framing（LSP 头式 / 裸 JSON 行式）自适应各类 stdio 实现。</p></div>
+        </div>
+      </section>
+
+      <section>
+        <h2 class="section-title">详细手册 / Guides</h2>
+        <div class="grid">
+          <div class="card">
+            <h3>🛠️ 安装与凭据</h3>
+            <p>uv tool / pipx 安装、一键安装器全部参数、凭据 opt-in 语义、卸载。</p>
+            <a class="go" href="INSTALL.md" onclick="loadDoc('INSTALL.md');return false;">阅读安装指南 →</a>
+          </div>
+          <div class="card">
+            <h3>🔗 Agent 接入指南（MCP）</h3>
+            <p>十家 agent 的 MCP 配置示例、pi 旧扩展迁移、协议双 framing 兼容说明。</p>
+            <a class="go" href="MCP.md" onclick="loadDoc('MCP.md');return false;">阅读 MCP 接入指南 →</a>
+          </div>
+          <div class="card">
+            <h3>🧭 路由与凭据</h3>
+            <p>层级与级联策略、路由提示、工具参数表、provider 配额与 429 节流、调用日志。</p>
+            <a class="go" href="ROUTING.md" onclick="loadDoc('ROUTING.md');return false;">阅读路由指南 →</a>
+          </div>
+          <div class="card">
+            <h3>🤖 AI Agent 机器可读索引</h3>
+            <p>AGENT-INDEX.json：工具 schema / 层级 / 凭据路径 / 文档 URL，供自动化集成。</p>
+            <a class="go" href="AGENT-INDEX.json" target="_blank" rel="noopener">查看 AGENT-INDEX.json →</a>
+          </div>
+        </div>
+      </section>
+
+      <footer>
+        MIT License · <a href="https://github.com/NinjaSln-labs/smart-web-search-mcp">NinjaSln-labs/smart-web-search-mcp</a> ·
+        Powered by GitHub Pages（main 分支 /docs，无构建步骤）
+      </footer>
+    </div>
+
+    <div id="viewer">
+      <div class="viewer-top">
+        <a class="btn ghost" href="index.html" onclick="showLanding();return false;">← 返回首页</a>
+        <a class="btn ghost" id="raw-link" href="#" target="_blank">查看 .md 原文</a>
+        <span class="doc-crumb" id="doc-crumb">正在阅读：<b id="doc-crumb-name"></b></span>
+      </div>
+      <article class="md-body" id="md-body" role="region" aria-label="文档内容" tabindex="-1"></article>
+    </div>
+  </main>
+
+<script>
+// ---- 文档元数据 ----
+var DOC_TITLES = {
+  'INSTALL.md': '安装与凭据',
+  'MCP.md': 'MCP 接入指南',
+  'ROUTING.md': '路由与凭据'
+};
+
+// ---- 极简 Markdown 渲染器（标题/代码块/表格/列表/引用/链接/行内样式）----
+function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function safeHref(h) { return /^\s*(javascript|data|vbscript):/i.test(h) ? '#' : h; }
+function inline(s) {
+  s = escHtml(s);
+  s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
+  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, txt, href) => {
+    const h = safeHref(href);
+    return /^(https?:)/.test(h) ? `<a href="${h}" target="_blank" rel="noopener">${txt}</a>` : `<a href="${h}">${txt}</a>`;
+  });
+  return s;
+}
+function renderMd(md) {
+  const lines = md.split('\n'); const out = []; let i = 0;
+  const flushP = buf => { if (buf.length) out.push('<p>' + buf.map(inline).join('<br>') + '</p>'); };
+  while (i < lines.length) {
+    const l = lines[i];
+    if (!l.trim()) { i++; continue; }
+    if (l.startsWith('```')) {                      // fenced code
+      const lang = l.slice(3).trim(); const buf = []; i++;
+      while (i < lines.length && !lines[i].startsWith('```')) { buf.push(lines[i]); i++; }
+      i++;
+      out.push(`<pre class="code" tabindex="0"><code data-lang="${lang}">${escHtml(buf.join('\n'))}</code></pre>`);
+      continue;
+    }
+    if (/^#{1,4} /.test(l)) {                        // headings
+      const n = l.match(/^#+/)[0].length;
+      out.push(`<h${n}>${inline(l.replace(/^#+ /, ''))}</h${n}>`); i++; continue;
+    }
+    if (l.trim() === '---') { out.push('<hr>'); i++; continue; }
+    if (l.startsWith('>')) {                         // blockquote
+      const buf = []; while (i < lines.length && lines[i].startsWith('>')) { buf.push(lines[i].replace(/^>\s?/, '')); i++; }
+      out.push('<blockquote>' + buf.map(inline).join('<br>') + '</blockquote>'); continue;
+    }
+    if (/^\|/.test(l) && i + 1 < lines.length && /^\|[\s:|-]+\|?\s*$/.test(lines[i+1])) {  // table
+      const cells = r => r.split('|').slice(1, -1).map(c => c.trim());
+      const head = cells(l); i += 2; const rows = [];
+      while (i < lines.length && /^\|/.test(lines[i])) { rows.push(cells(lines[i])); i++; }
+      out.push('<table tabindex="0"><thead><tr>' + head.map(h => `<th>${inline(h)}</th>`).join('') + '</tr></thead><tbody>' +
+        rows.map(r => '<tr>' + head.map((_, k) => `<td>${inline(r[k] || '')}</td>`).join('') + '</tr>').join('') +
+        '</tbody></table>');
+      continue;
+    }
+    if (/^\s*([-*]|\d+\.) /.test(l)) {               // lists
+      const ordered = /^\s*\d+\./.test(l); const tag = ordered ? 'ol' : 'ul';
+      const items = [];
+      while (i < lines.length && /^\s*([-*]|\d+\.) /.test(lines[i])) {
+        items.push('<li>' + inline(lines[i].replace(/^\s*([-*]|\d+\.) /, '')) + '</li>'); i++;
+      }
+      out.push(`<${tag}>${items.join('')}</${tag}>`); continue;
+    }
+    const buf = [];                                   // paragraph
+    while (i < lines.length && lines[i].trim() && !/^(#{1,4} |```|>|\||\s*([-*]|\d+\.) |---$)/.test(lines[i])) { buf.push(lines[i]); i++; }
+    flushP(buf);
+  }
+  return out.join('\n');
+}
+
+// ---- 文档加载（history 集成 + 加载态 + 标题/焦点 + 错误恢复）----
+var currentDoc = null;
+var fetchController = null;
+
+function setLoading(msg) {
+  document.getElementById('md-body').innerHTML = '<p style="color:var(--muted)">' + msg + '</p>';
+}
+function setError(name, status) {
+  const retry = `<button class="btn ghost" onclick="loadDoc('${name}', false)">重试</button>`;
+  const hint = status === 404 ? '文档不存在（可能已改名/删除）。'
+    : '网络错误或文档站暂不可用。';
+  document.getElementById('md-body').innerHTML =
+    `<p>${hint}可直接访问 <a href="${name}">${name}</a> 原文。 ${retry}</p>`;
+}
+function showViewer(name) {
+  document.getElementById('landing').style.display = 'none';
+  document.getElementById('viewer').style.display = 'block';
+  document.getElementById('raw-link').href = name;
+  document.title = 'smart-web-search-mcp · ' + (DOC_TITLES[name] || name);
+  document.getElementById('doc-crumb-name').textContent = DOC_TITLES[name] || name;
+  const body = document.getElementById('md-body');
+  body.focus({ preventScroll: true });
+  window.scrollTo(0, 0);
+}
+function loadDoc(name, pushState) {
+  if (pushState !== false && history.pushState) {
+    history.pushState({ doc: name }, '', '#doc=' + encodeURIComponent(name));
+  }
+  currentDoc = name;
+  setLoading('加载中…');
+  if (fetchController) fetchController.abort();
+  fetchController = new AbortController();
+  const timer = setTimeout(() => fetchController.abort(), 10000);   // 10s 超时
+  fetch(name, { signal: fetchController.signal }).then(r => {
+    if (!r.ok) throw { status: r.status };
+    return r.text();
+  }).then(md => {
+    document.getElementById('md-body').innerHTML = renderMd(md);
+    showViewer(name);
+  }).catch(err => {
+    if (err && err.name === 'AbortError') { setError(name, 0); }
+    else if (err && err.status === 404) { setError(name, 404); }
+    else { setError(name, 0); }
+  }).finally(() => clearTimeout(timer));
+}
+function showLanding() {
+  if (history.pushState) history.pushState({ doc: null }, '', location.pathname);
+  currentDoc = null;
+  document.getElementById('viewer').style.display = 'none';
+  document.getElementById('landing').style.display = 'block';
+  document.title = 'smart-web-search-mcp 文档';
+  window.scrollTo(0, 0);
+}
+window.addEventListener('popstate', e => {
+  const doc = e.state && e.state.doc;
+  if (doc && doc !== currentDoc) { loadDoc(doc, false); }
+  else if (!doc) { showLandingNoPush(); }
+});
+function showLandingNoPush() {
+  currentDoc = null;
+  document.getElementById('viewer').style.display = 'none';
+  document.getElementById('landing').style.display = 'block';
+  document.title = 'smart-web-search-mcp 文档';
+  window.scrollTo(0, 0);
+}
+
+// ---- 站内全文搜索 ----
+var SEARCH_DOCS = Object.keys(DOC_TITLES);
+function doSearch() {
+  const q = document.getElementById('search-input').value.trim().toLowerCase();
+  const box = document.getElementById('search-results');
+  if (!q) { box.innerHTML = ''; return; }
+  box.innerHTML = '<p class="sr-head">搜索中…</p>';
+  Promise.all(SEARCH_DOCS.map(name =>
+    fetch(name).then(r => r.ok ? r.text() : '').catch(() => '')
+  )).then(texts => {
+    const results = [];
+    texts.forEach((txt, idx) => {
+      if (!txt) return;
+      const lines = txt.split('\n');
+      const hits = [];
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].toLowerCase().includes(q)) {
+          hits.push({ line: i + 1, text: lines[i].trim().slice(0, 120) });
+          if (hits.length >= 3) break;
+        }
+      }
+      if (hits.length) results.push({ name: SEARCH_DOCS[idx], title: DOC_TITLES[SEARCH_DOCS[idx]], hits });
+    });
+    if (!results.length) { box.innerHTML = '<p class="sr-none">无匹配结果，换个关键词试试。</p>'; return; }
+    const total = results.reduce((s, r) => s + r.hits.length, 0);
+    box.innerHTML = '<p class="sr-head">找到 ' + results.length + ' 个文档 / ' + total + ' 处匹配：</p>' +
+      results.map(r =>
+        '<div class="sr-item"><a href="' + r.name + '" onclick="loadDoc(\'' + r.name + '\');return false;">' + escHtml(r.title) + '</a>' +
+        r.hits.map(h => '<div class="sr-hit">L' + h.line + '：' + escHtml(h.text) + '</div>').join('') +
+        '</div>'
+      ).join('');
+  }).catch(() => { box.innerHTML = '<p class="sr-err">搜索失败，请稍后重试。</p>'; });
+}
+document.getElementById('search-btn').addEventListener('click', doSearch);
+document.getElementById('search-input').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+
+// ---- 初始深链接 ----
+if (location.hash && location.hash.startsWith('#doc=')) {
+  loadDoc(decodeURIComponent(location.hash.slice(5)), false);
+}
+</script>
+</body>
+</html>
