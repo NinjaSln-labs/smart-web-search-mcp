@@ -12,6 +12,22 @@ L3  serper (Google; 2500 one-time free, then paid)                  unconditiona
 
 The router picks the first layer with enough results and stops — cheap providers answer first, paid ones only fire when needed. Every call returns the full routing chain so the LLM can learn which layer served it.
 
+### Output format (v0.2.0)
+
+By default the tool returns **readable result blocks** (aligned with what the major search MCP servers converged on), not raw provider JSON:
+
+```
+[1] Title: Example Page
+    URL: https://…
+    Published: 2026-09-28
+    Snippet: …
+
+──
+from L1 wigolo | kept 3 of 20 | layers: wigolo(degraded 10) → keenable(ok 10) | 4261ms
+```
+
+Pass `output_format: "json"` to get a structured envelope instead: `{ query, results[], meta, chain }` with whitelist fields only (`title/url/snippet/published/source` per result).
+
 The package ships two console commands:
 
 - `smart-web-search-mcp` — the MCP stdio server (spawn-per-call core, zero cross-call state; Node ≥ 22.7 required for strip-only TypeScript execution — no build step)
@@ -68,7 +84,13 @@ smart-web-search-install                # 自动探测本机 agent 并写入 MCP
 
 ### 工具参数（`smart_web_search`）
 
-- `query`（必填）；`max_results`（默认 5）；`intent`（general/news/paper/code/research，影响路由）；`recency`（day/week/month/year）；`include_domains` / `exclude_domains`（逗号分隔域名黑白名单，跨层生效）；`depth`（basic/advanced）。
+- `query`（必填）；`max_results`（默认 5）；`intent`（general/news/paper/code/research，影响路由）；`recency`（day/week/month/year）；`include_domains` / `exclude_domains`（逗号分隔域名黑白名单，跨层生效）；`depth`（basic/advanced）；`output_format`（`text` 默认 | `json`）。
+
+### 输出格式（v0.2.0 起）
+
+- **默认 `text`**：标签块文本（`[1] Title: … / URL: … / Published: …（有则给）/ Source: …（有则给）/ Snippet: …`，条目间空行），底部一行页脚：`from L<层> <provider> | kept <截后> of <截前> | dedup: <去重前>→<去重后>（L1 有重复时） | layers: <各层(状态 条数)> | <总耗时>ms`。空结果回单句 `No results found (layers tried: …)`。
+- **`output_format:"json"`**：结构化 envelope `{ query, results[], meta, chain }`，results 每条只含白名单字段 `title/url/snippet/published/source`，chain 只含 `layer/provider/status/result_count/latency_ms/error`。
+- 行为变更（相对 0.1.x）：结果文本不再是 provider 原始 JSON；L1 双源合并按 URL 去重后截到 `max_results`（此前两源各截一份、最多 2×max）。需要旧式结构化数据请用 `output_format:"json"`。
 
 ### 环境要求
 

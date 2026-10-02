@@ -76,7 +76,7 @@ function runCoreOnce(searchParams) {
 // 简化：description 写死（与核心一致），避免多一次 spawn
 toolDescription =
 	"5-provider web search with cascade routing. L1 wigolo (free, 18 engines) + keenable (100K/mo free, independent index) in parallel → L2 tinyfish → tavily (serial; AI-optimized, 1000/mo free) → L3 serper (Google, 2500 free then paid). " +
-	"Returns search results + per-layer call chain. Use this as the DEFAULT web search tool.";
+	"Returns search results as readable blocks (Title/URL/Snippet) with a one-line routing footer; output_format=json gives a structured envelope. Use this as the DEFAULT web search tool.";
 
 function toJsonSchema() {
 	// 与核心 SearchInput 一致的 JSON schema（手工维护，改核心入参时同步）
@@ -92,6 +92,7 @@ function toJsonSchema() {
 			exclude_domains: { type: "string", description: "Comma-separated domain blacklist" },
 			depth: { type: "string", enum: ["basic", "advanced"], description: "Search depth — basic=cheap, advanced=more thorough" },
 			location: { type: "string", description: "Geo bias (e.g. US, CN)" },
+			output_format: { type: "string", enum: ["text", "json"], description: "Output format: text (default) = readable result blocks; json = structured envelope (query/results/meta/chain)" },
 		},
 	};
 }

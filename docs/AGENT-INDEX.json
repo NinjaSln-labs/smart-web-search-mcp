@@ -1,44 +1,108 @@
 {
   "name": "smart-web-search-mcp",
   "displayName": "Smart Web Search MCP",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "mcp-server",
   "transport": "stdio",
   "command": "smart-web-search-mcp",
   "args": [],
-  "runtime": { "python": ">=3.10", "node": ">=22.7" },
+  "runtime": {
+    "python": ">=3.10",
+    "node": ">=22.7"
+  },
   "install": {
     "pypi": "smart-web-search-mcp",
-    "commands": ["uv tool install smart-web-search-mcp", "pipx install smart-web-search-mcp"],
+    "commands": [
+      "uv tool install smart-web-search-mcp",
+      "pipx install smart-web-search-mcp"
+    ],
     "agentInstaller": "smart-web-search-install",
-    "agentInstallerFlags": ["--list", "--dry-run", "--force", "--agents <a,b,c>"]
+    "agentInstallerFlags": [
+      "--list",
+      "--dry-run",
+      "--force",
+      "--agents <a,b,c>"
+    ]
   },
   "tools": [
     {
       "name": "smart_web_search",
-      "description": "5-provider web search with cascade routing: L1 wigolo+keenable (free, parallel) -> L2 tinyfish->tavily (serial) -> L3 serper (unconditional fallback). Returns results plus the full routing chain.",
+      "description": "5-provider web search with cascade routing: L1 wigolo+keenable (free, parallel) -> L2 tinyfish->tavily (serial) -> L3 serper (unconditional fallback). Returns results plus the full routing chain. Returns readable result blocks by default; output_format=json gives a structured envelope.",
       "inputSchema": {
         "type": "object",
         "properties": {
-          "query": { "type": "string", "minLength": 1, "maxLength": 2000 },
-          "max_results": { "type": "integer", "minimum": 1, "maximum": 50, "default": 5 },
-          "intent": { "type": "string", "enum": ["general", "news", "paper", "code", "research"] },
-          "recency": { "type": "string", "enum": ["day", "week", "month", "year"] },
-          "include_domains": { "type": "string", "description": "comma-separated domain whitelist" },
-          "exclude_domains": { "type": "string", "description": "comma-separated domain blacklist" },
-          "depth": { "type": "string", "enum": ["basic", "advanced"] }
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "max_results": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "default": 5
+          },
+          "intent": {
+            "type": "string",
+            "enum": [
+              "general",
+              "news",
+              "paper",
+              "code",
+              "research"
+            ]
+          },
+          "recency": {
+            "type": "string",
+            "enum": [
+              "day",
+              "week",
+              "month",
+              "year"
+            ]
+          },
+          "include_domains": {
+            "type": "string",
+            "description": "comma-separated domain whitelist"
+          },
+          "exclude_domains": {
+            "type": "string",
+            "description": "comma-separated domain blacklist"
+          },
+          "depth": {
+            "type": "string",
+            "enum": [
+              "basic",
+              "advanced"
+            ]
+          }
         },
-        "required": ["query"]
+        "required": [
+          "query"
+        ]
       }
     }
   ],
   "providers": {
-    "L1": ["wigolo (free, needs `npm i -g wigolo`)", "keenable (free public tier 1K/hour; key: 100K/mo)"],
-    "L2": ["tinyfish (pay-as-you-go wallet)", "tavily (1000/mo free, opt-in)"],
-    "L3": ["serper (Google, 2500 one-time free then paid, opt-in)"]
+    "L1": [
+      "wigolo (free, needs `npm i -g wigolo`)",
+      "keenable (free public tier 1K/hour; key: 100K/mo)"
+    ],
+    "L2": [
+      "tinyfish (pay-as-you-go wallet)",
+      "tavily (1000/mo free, opt-in)"
+    ],
+    "L3": [
+      "serper (Google, 2500 one-time free then paid, opt-in)"
+    ]
   },
   "credentials": {
-    "env": ["TINYFISH_API_KEY", "TAVILY_API_KEY", "SERPER_API_KEY", "KEENABLE_API_KEY"],
+    "env": [
+      "TINYFISH_API_KEY",
+      "TAVILY_API_KEY",
+      "SERPER_API_KEY",
+      "KEENABLE_API_KEY"
+    ],
     "configFile": "~/.pi/agent/extensions/smart-web-search-mcp.config.json",
     "optional": true
   },

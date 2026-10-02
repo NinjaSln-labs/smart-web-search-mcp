@@ -55,3 +55,7 @@ JSONL 逐条落盘 `~/.pi/log/smart_web_search.jsonl`：`ts / request_id / input
 | serper | L3 | 跳过（opt-in） | 2500 次一次性免费后付费（`SERPER_API_KEY`） |
 
 key 优先级：config 显式 `key` > 环境变量 > `~/.cursor/mcp.json` / `~/.pi/agent/models.json`。配置文件路径：`~/.pi/agent/extensions/smart-web-search-mcp.config.json`（模板见包内 `smart-web-search-mcp.config.example.json`）。
+
+## 页脚与日志
+
+每次调用的文本输出以一行页脚收尾：`from L<n> <provider> | kept X of Y | dedup: R→D（L1 有重复时） | layers: <各层(状态 条数)> | <耗时>ms`——即路由决策的摘要视图；完整细节（含各层 raw_text、usage、engine_pool）只落 `~/.pi/log/smart_web_search.jsonl`，不进工具返回值。路由判定（充足性/升层）仍按各层原始 result_count，不受展示层去重影响。

@@ -682,6 +682,130 @@ function postFilterResults(rawText: string, maxResults: number): string {
 	return prefix + jsonStr;
 }
 
+// ─── 输出统一化：provider 原始 JSON → 归一化 items → agent 可读文本/envelope ──
+// 设计约定（方案定稿 v3.1）：
+//   - 文本主通道 = 标签块（Title:/URL:/…），对齐 Exa/Tavily 官方 MCP 的输出形态
+//   - 噪音零上浮：relevance_score/evidence_score/cached*/freshness_signal/position/id 等不出工具返回值
+//   - 路由判定（l1Sufficient）不消费本节任何产物，仍吃各层 result_count 原始计数
+//   - normalize 失败回退 raw_text（页脚 format=raw），绝不把有结果变无结果
+
+interface UnifiedItem {
+	title: string;
+	url: string;
+	snippet: string;
+	published: string;
+	source: string;
+}
+
+/** 从 provider raw_text 剥离前缀通知（如 "[wigolo notice] ..."），定位 JSON 起点 */
+function stripJsonPrefix(rawText: string): { prefix: string; json: string } {
+	const jsonStart = rawText.search(/[\{\[]/);
+	if (jsonStart < 0) return { prefix: "", json: "" };
+	return { prefix: rawText.slice(0, jsonStart), json: rawText.slice(jsonStart) };
+}
+
+/**
+ * provider raw_text → UnifiedItem[]。
+ * 字段映射（JSONL 176 请求实测）：wigolo{title,url,snippet,published_date} /
+ * keenable{title,url} / tinyfish{title,url,snippet,date,site_name,publisher} /
+ * serper{title,url,content,source} / tavily{title,url,content,published_date}。
+ * 解析失败返回 []（调用方回退 raw_text）。
+ */
+function normalizeProviderText(provider: string, rawText: string): UnifiedItem[] {
+	if (!rawText) return [];
+	const { json } = stripJsonPrefix(rawText);
+	if (!json) return [];
+	let obj: unknown = null;
+	try { obj = JSON.parse(json); } catch { return []; }
+	const arr = obj && typeof obj === "object" && Array.isArray((obj as { results?: unknown }).results)
+		? (obj as { results: unknown[] }).results
+		: (Array.isArray(obj) ? obj : null);
+	if (!arr) return [];
+	const str = (v: unknown): string => (typeof v === "string" ? v : typeof v === "number" ? String(v) : "");
+	return arr
+		.filter((it): it is Record<string, unknown> => !!it && typeof it === "object" && !Array.isArray(it))
+		.map((it) => ({
+			title: str(it.title),
+			url: str(it.url),
+			snippet: str(it.snippet) || str(it.content),
+			published: str(it.published_date) || str(it.date),
+			source: str(it.site_name) || str(it.publisher) || str(it.source),
+		}))
+		.filter((it) => it.title || it.url);
+}
+
+/** L1 两源合并：按 url 去重（wigolo 优先），切片到 max。rawCount=去重前总数，dedupedCount=去重后总数 */
+function mergeL1Items(wItems: UnifiedItem[], kItems: UnifiedItem[], max: number): { items: UnifiedItem[]; rawCount: number; dedupedCount: number } {
+	const seen = new Set<string>();
+	const deduped: UnifiedItem[] = [];
+	for (const it of [...wItems, ...kItems]) {
+		const key = it.url || it.title;
+		if (key && seen.has(key)) continue;
+		if (key) seen.add(key);
+		deduped.push(it);
+	}
+	return { items: deduped.slice(0, max), rawCount: wItems.length + kItems.length, dedupedCount: deduped.length };
+}
+
+interface TextOutputCtx {
+	stoppedAt: number;
+	provider: string;
+	dedupedCount: number;
+	rawCount: number;
+	layersTried: Array<{ provider: string; status: string; count: number }>;
+	totalLatencyMs: number;
+	formatRaw: boolean;
+	/** format=raw 回退时的原始文本（items 为空但有 raw 结果时附在页脚前） */
+	rawFallback?: string;
+}
+
+/** UnifiedItem[] → 标签块文本 + 一行页脚（kept 口径：Y=去重后、切片前） */
+function assembleTextOutput(items: UnifiedItem[], ctx: TextOutputCtx): string {
+	const dedupNote = ctx.dedupedCount < ctx.rawCount ? ` | dedup: ${ctx.rawCount}→${ctx.dedupedCount}` : "";
+	const layers = ctx.layersTried.map((l) => `${l.provider}(${l.status} ${l.count})`).join(" → ");
+	const footer = [
+		`from L${ctx.stoppedAt} ${ctx.provider}`,
+		`kept ${items.length} of ${ctx.dedupedCount}`,
+		ctx.formatRaw ? "format=raw" : null,
+		dedupNote,
+		`layers: ${layers || "-"}`,
+		`${ctx.totalLatencyMs}ms`,
+	].filter(Boolean).join(" | ");
+	if (items.length === 0) {
+		if (ctx.formatRaw && ctx.rawFallback) return `${ctx.rawFallback}\n\n──\n${footer}`;
+		const tried = ctx.layersTried.map((l) => l.provider).join(", ") || "none";
+		return `No results found (layers tried: ${tried}).`;
+	}
+	const blocks = items.map((it, i) => {
+		const lines = [`[${i + 1}] Title: ${it.title}`, `    URL: ${it.url}`];
+		if (it.published) lines.push(`    Published: ${it.published}`);
+		if (it.source) lines.push(`    Source: ${it.source}`);
+		if (it.snippet) lines.push(`    Snippet: ${it.snippet}`);
+		return lines.join("\n");
+	});
+	return `${blocks.join("\n\n")}\n\n──\n${footer}`;
+}
+
+/** json 模式 envelope（chain 只留白名单键；与 details.chain 对齐） */
+function assembleEnvelope(query: string, items: UnifiedItem[], chain: LayerCall[], ctx: { stoppedAt: number; provider: string; totalLatencyMs: number; totalCredits: number; dedupedCount: number }): string {
+	return JSON.stringify({
+		query,
+		results: items,
+		meta: {
+			stopped_at: ctx.stoppedAt,
+			provider: ctx.provider,
+			total_latency_ms: ctx.totalLatencyMs,
+			total_credits_used: ctx.totalCredits,
+			results_kept: items.length,
+			results_before_truncation: ctx.dedupedCount,
+		},
+		chain: chain.map((c) => ({
+			layer: c.layer, provider: c.provider, status: c.result.status,
+			result_count: c.result.result_count, latency_ms: c.result.latency_ms, error: c.result.error,
+		})),
+	});
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Smart web search tool implementation
 // ═══════════════════════════════════════════════════════════════════════
@@ -695,6 +819,7 @@ interface SearchInput {
 	exclude_domains?: string | null;
 	depth?: "basic" | "advanced" | null;
 	location?: string | null;
+	output_format?: "text" | "json" | null;
 }
 
 interface LayerCall {
@@ -979,11 +1104,11 @@ async function runCliSearch(params: SearchInput): Promise<{ query: string; resul
 	].filter(Boolean).join("\n\n");
 
 	let stoppedAt = 0;
-	let finalText = "No results from any layer.";
+	let winner: LayerCall | null = null;
 	// L1 足够
 	if (l1Sufficient) {
 		stoppedAt = 1;
-		finalText = l1CombinedRaw;
+		winner = l1WigoloCall.result.result_count > 0 || l1WigoloCall.result.raw_text ? l1WigoloCall : l1KeenableCall;
 	}
 	// C3：L2/L3 级联走共享 runL2L3（与 pi execute 单源，消除双路径漂移）
 	if (stoppedAt === 0) {
@@ -994,21 +1119,62 @@ async function runCliSearch(params: SearchInput): Promise<{ query: string; resul
 		});
 		if (l2l3.l2Winner) {
 			stoppedAt = 2;
-			finalText = postFilterResults(l2l3.l2Winner.result.raw_text, maxResults);
+			winner = l2l3.l2Winner;
 		} else if (l2l3.l3Winner) {
 			stoppedAt = 3;
-			finalText = postFilterResults(l2l3.l3Winner.result.raw_text, maxResults);
+			winner = l2l3.l3Winner;
 		}
 	}
+	// 若全层 error/empty/skipped，兜底取有 raw_text 的层（与 pi execute 同判据）
+	if (stoppedAt === 0) {
+		for (const c of chain) {
+			if (c.result.raw_text && c.result.raw_text.length > 50) {
+				stoppedAt = c.layer;
+				winner = c;
+				break;
+			}
+		}
+	}
+	// ─── Unified output: winner raw_text → items（与 pi execute 同一批函数）───
+	const outputFormat = input.output_format === "json" ? "json" : "text";
+	let items: UnifiedItem[] = [];
+	let rawCount = 0;
+	let dedupedCount = 0;
+	if (stoppedAt === 1) {
+		const merged = mergeL1Items(
+			normalizeProviderText("wigolo", l1WigoloCall.result.raw_text),
+			normalizeProviderText("keenable", l1KeenableCall.result.raw_text),
+			maxResults,
+		);
+		items = merged.items; rawCount = merged.rawCount; dedupedCount = merged.dedupedCount;
+	} else if (winner) {
+		const norm = normalizeProviderText(winner.provider, winner.result.raw_text);
+		dedupedCount = norm.length; rawCount = norm.length;
+		items = norm.slice(0, maxResults);
+	}
+	const formatRaw = stoppedAt > 0 && items.length === 0;
+	const rawFallback = formatRaw
+		? (stoppedAt === 1 ? l1CombinedRaw : postFilterResults(winner?.result.raw_text ?? "", maxResults))
+		: "";
+	const winnerProvider = winner?.provider ?? "-";
+	const layersTried = chain
+		.filter((c) => c.result.status !== "skipped")
+		.map((c) => ({ provider: c.provider, status: c.result.status, count: c.result.result_count }));
 	const totalLatency = Date.now() - t0;
 	const totalCredits = chain.reduce((s, c) => s + c.result.credits_used, 0);
+	const resultsText = outputFormat === "json"
+		? assembleEnvelope(input.query, items, chain, { stoppedAt, provider: winnerProvider, totalLatencyMs: totalLatency, totalCredits, dedupedCount })
+		: assembleTextOutput(items, {
+			stoppedAt, provider: winnerProvider, dedupedCount, rawCount,
+			layersTried, totalLatencyMs: totalLatency, formatRaw, rawFallback,
+		});
 	return {
 		query: input.query,
-		results_text: `Search results (from L${stoppedAt}):
-${finalText}`,
+		results_text: resultsText,
 		details: {
 			request_id: requestId,
 			stopped_at: stoppedAt,
+			output_mode: outputFormat,
 			total_latency_ms: totalLatency,
 			total_credits_used: totalCredits,
 			chain: chain.map((c) => ({ layer: c.layer, provider: c.provider, status: c.result.status, result_count: c.result.result_count, latency_ms: c.result.latency_ms, credits_used: c.result.credits_used, error: c.result.error })),
@@ -1146,6 +1312,11 @@ export default function smartWebSearch(pi?: ExtensionAPI) {
 				})
 			),
 			location: Type.Optional(Type.String({ description: "Geo bias (e.g. US, CN) — only honored if layer supports it" })),
+			output_format: Type.Optional(
+				StringEnum(["text", "json"] as const, {
+					description: "Output format: text (default) = readable result blocks; json = structured envelope (query/results/meta/chain)",
+				})
+			),
 		}),
 		async execute(_id, params) {
 			const input = params as SearchInput;
@@ -1269,12 +1440,11 @@ export default function smartWebSearch(pi?: ExtensionAPI) {
 
 			// ─── Pick final answer: first layer with results ──────────
 			let stoppedAt = 0;
-			let finalText = "No results from any layer.";
+			let winner: LayerCall | null = null;
 			for (const c of chain) {
 				if (c.result.status === "ok" || c.result.status === "degraded") {
 					stoppedAt = c.layer;
-					// For L1, use the merged+filtered raw text; for L2/L3 post-filter to maxResults
-					finalText = c.layer === 1 ? l1CombinedRaw : postFilterResults(c.result.raw_text, maxResults);
+					winner = c;
 					break;
 				}
 			}
@@ -1283,11 +1453,37 @@ export default function smartWebSearch(pi?: ExtensionAPI) {
 				for (const c of chain) {
 					if (c.result.raw_text && c.result.raw_text.length > 50) {
 						stoppedAt = c.layer;
-						finalText = c.layer === 1 ? l1CombinedRaw : postFilterResults(c.result.raw_text, maxResults);
+						winner = c;
 						break;
 					}
 				}
 			}
+			// ─── Unified output: winner raw_text → items ──────────────
+			const outputFormat = input.output_format === "json" ? "json" : "text";
+			let items: UnifiedItem[] = [];
+			let rawCount = 0;
+			let dedupedCount = 0;
+			if (stoppedAt === 1) {
+				const merged = mergeL1Items(
+					normalizeProviderText("wigolo", l1WigoloCall.result.raw_text),
+					normalizeProviderText("keenable", l1KeenableCall.result.raw_text),
+					maxResults,
+				);
+				items = merged.items; rawCount = merged.rawCount; dedupedCount = merged.dedupedCount;
+			} else if (winner) {
+				const norm = normalizeProviderText(winner.provider, winner.result.raw_text);
+				dedupedCount = norm.length; rawCount = norm.length;
+				items = norm.slice(0, maxResults);
+			}
+			// normalize 失败（provider 改格式等）→ 回退 raw_text，不把有结果变无结果
+			const formatRaw = stoppedAt > 0 && items.length === 0;
+			const rawFallback = formatRaw
+				? (stoppedAt === 1 ? l1CombinedRaw : postFilterResults(winner?.result.raw_text ?? "", maxResults))
+				: "";
+			const winnerProvider = winner?.provider ?? "-";
+			const layersTried = chain
+				.filter((c) => c.result.status !== "skipped")
+				.map((c) => ({ provider: c.provider, status: c.result.status, count: c.result.result_count }));
 
 			// Total latency + credits
 			const totalLatency = chain.reduce((s, c) => s + c.result.latency_ms, 0);
@@ -1303,6 +1499,7 @@ export default function smartWebSearch(pi?: ExtensionAPI) {
 				chain,
 				final: {
 					stopped_at: stoppedAt,
+					output_mode: outputFormat,
 					total_latency_ms: totalLatency,
 					total_credits_used: totalCredits,
 					l1_sufficient: l1Sufficient,
@@ -1313,11 +1510,13 @@ export default function smartWebSearch(pi?: ExtensionAPI) {
 			writeLog(logEntry);
 
 			// ─── Return to LLM ───────────────────────────────────────
-			const chainSummary = chain
-				.map((c) => `[L${c.layer} ${c.provider} ${c.result.status}] ${c.result.result_count} results, ${c.result.latency_ms}ms${c.result.error ? " err=" + c.result.error.slice(0, 80) : ""}`)
-				.join("\n\n");
-			const stoppedProvider = chain.find((c) => c.layer === stoppedAt)?.provider ?? "-";
-			const content = `Search results (from L${stoppedAt}, ${stoppedProvider}):\n${finalText}\n\n── Routing chain ──\n${chainSummary}`;
+			const textCtx: TextOutputCtx = {
+				stoppedAt, provider: winnerProvider, dedupedCount, rawCount,
+				layersTried, totalLatencyMs: totalLatency, formatRaw, rawFallback,
+			};
+			const content = outputFormat === "json"
+				? assembleEnvelope(input.query, items, chain, { stoppedAt, provider: winnerProvider, totalLatencyMs: totalLatency, totalCredits, dedupedCount })
+				: assembleTextOutput(items, textCtx);
 			return {
 				content: [{ type: "text", text: content }],
 				details: {

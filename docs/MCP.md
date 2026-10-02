@@ -103,3 +103,23 @@ reasonix mcp add smart-web-search -- smart-web-search-mcp
 - **裸 JSON 行式**（每行一个 JSON + 换行）——reasonix 等 Rust rmcp 系客户端走这条
 
 server 为 spawn-per-call 架构：每次 `tools/call` 独立 spawn 子进程跑一次完整搜索后退出，跨调用零状态累积，升级/重装不影响已写入的配置（各客户端只引用稳定命令名）。
+
+## 输出格式（v0.2.0 起）
+
+`smart_web_search` 默认返回**标签块文本**（不是 provider 原始 JSON）：
+
+```
+[1] Title: …
+    URL: …
+    Published: …   ← 有才输出
+    Source: …      ← 有才输出
+    Snippet: …
+
+──
+from L1 wigolo | kept 3 of 20 | dedup: 23→20 | layers: wigolo(degraded 10) → keenable(ok 10) | 4261ms
+```
+
+- 页脚：胜出层、截断口径（kept X of Y，Y=去重后切片前）、L1 去重（有重复才出现）、各层(状态 条数)、总耗时。
+- `output_format:"json"` 返回结构化 envelope：`{ query, results[], meta, chain }`；results 每条白名单字段 `title/url/snippet/published/source`，chain 白名单 `layer/provider/status/result_count/latency_ms/error`。
+- 空结果：单句 `No results found (layers tried: …)`。
+- 三处 schema（ts `SearchInput` / ts `Type.Object` / mjs `toJsonSchema()`）均含 `output_format` 参数。
