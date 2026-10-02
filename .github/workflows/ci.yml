@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # ubuntu-26.04 金丝雀：ubuntu-latest 将于 2026-11 迁至 26.04（actions/runner-images#14748），提前暴露兼容问题
+        os: [ubuntu-latest, ubuntu-26.04, windows-latest]
+        python-version: ['3.10', '3.13']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install (editable)
+        run: pip install -e .
+      - name: Verify (strip-only + pytest)
+        run: python scripts/verify.py

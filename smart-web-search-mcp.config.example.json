@@ -1,0 +1,22 @@
+{
+  "_comment": "Smart Web Search provider config (opt-in). Delete this file or set enabled:false to use only L1 (wigolo, free). Copy to smart-web-search-mcp.config.json (no .example) and edit. NEVER commit the real file with keys.",
+  "tinyfish": {
+    "enabled": false,
+    "notes": "Set enabled:true to opt in. Then either set 'key' here OR have TINYFISH_API_KEY env / ~/.cursor/mcp.json entry."
+  },
+  "tavily": {
+    "enabled": false,
+    "key": "",
+    "notes": "Set enabled:true + paste your tvly-... key here. Or set TAVILY_API_KEY env. Get free key at app.tavily.com (1000 credits/month free)."
+  },
+  "keenable": {
+    "enabled": false,
+    "key": "",
+    "notes": "Public tier (no key) is always available — 100K requests/month free with key. Set enabled:true + paste your keen_... key here, or set KEENABLE_API_KEY env. Get key at app.keenable.ai/console. Without key: 1K req/hour shared public tier, auto-throttles on 429."
+  },
+  "serper": {
+    "enabled": false,
+    "key": "",
+    "notes": "L3 fallback (Google via serper.dev). Set enabled:true + paste your key here, or set SERPER_API_KEY env. Register at serper.dev for a one-time 2500 free queries, then pay-as-you-go. True key lives only in the deployed config.json, never here."
+  }
+}

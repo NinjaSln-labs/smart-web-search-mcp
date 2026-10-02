@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smart-web-search-mcp"
+version = "0.1.0"
+description = "Smart Web Search MCP server — 5-provider fusion routing (wigolo+keenable → tinyfish→tavily → serper) with a one-click installer for 10 AI agent CLIs"
+readme = "README.md"
+requires-python = ">=3.10"
+# 运行时零依赖（卖点）：只由标准库写成
+dependencies = []
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "NinjaSln" }]
+keywords = ["mcp", "web-search", "agent", "llm", "search-router", "model-context-protocol"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
+]
+
+[project.urls]
+Homepage = "https://github.com/NinjaSln-labs/smart-web-search-mcp"
+
+[project.scripts]
+smart-web-search-install = "smart_web_search_mcp.agent_install:main"
+smart-web-search-mcp = "smart_web_search_mcp.server:main"
+
+[dependency-groups]
+test = ["pytest>=8"]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+packages = ["smart_web_search_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

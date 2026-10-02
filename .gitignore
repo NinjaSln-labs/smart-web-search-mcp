@@ -1,0 +1,12 @@
+src/smart_web_search_mcp/smart-web-search-mcp.ts
+src/smart_web_search_mcp/smart-web-search-mcp-server.mjs
+src/smart_web_search_mcp/smart-web-search-mcp.config.example.json
+__pycache__/
+*.pyc
+node_modules/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+node_modules/
+!src/smart_web_search_mcp/node_modules/
