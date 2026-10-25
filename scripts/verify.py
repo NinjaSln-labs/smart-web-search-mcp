@@ -41,11 +41,26 @@ def check_strip_only() -> int:
     return status
 
 
+def check_vendored_assets() -> int:
+    """wheel 运行期资产守卫：核心 `import { Type } from "typebox"` 依赖包内
+    vendored typebox/build/；该目录曾被 .gitignore 的 build/ 规则漏掉，导致
+    发布的 wheel 缺运行文件（v0.2.1 教训）。缺文件即红。"""
+    p = ROOT / "src" / "smart_web_search_mcp" / "node_modules" / "typebox" / "build" / "index.mjs"
+    if not p.is_file():
+        print(f"[verify] vendored 缺文件: {p}")
+        return 1
+    print("[verify] vendored assets PASS")
+    return 0
+
+
 def main():
     failed = []
     print("[verify] strip-only ...")
     if check_strip_only() != 0:
         failed.append("strip-only")
+    print("[verify] vendored assets ...")
+    if check_vendored_assets() != 0:
+        failed.append("vendored-assets")
     print("[verify] pytest ...")
     if subprocess.run([sys.executable, "-m", "pytest"]).returncode != 0:
         failed.append("pytest")
