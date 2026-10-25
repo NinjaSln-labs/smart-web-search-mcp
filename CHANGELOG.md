@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-10-26
+
+### Fixed
+
+- **v0.2.1 wheel 缺运行资产（无法使用）**：`.gitignore` 的 `build/` 规则误杀了 vendored 的 `typebox/build/`，使其从未被 git 跟踪——发布的 wheel 里 `typebox` 只剩顶层 3 个文件，核心启动即 `ERR_MODULE_NOT_FOUND`。v0.2.0 同样缺失，此前一直被 `server.py` 的"真源仓优先"降级掩盖（本机恰好装了真源仓）；v0.2.1 移除降级后在干净环境暴露。
+  修复：`build/` 收窄为 `/build/`（仅指 setuptools 产物目录）；正式纳入 vendored `typebox` 全部文件；`verify.py` 增 vendored-assets 守卫，CI 与发布前同源校验，杜绝再发缺件包。
+
+> 注：0.2.1 的功能变更（看门狗/取消处理/诊断日志/级联预算/发布包自洽）随本版本一并生效。
+
 ## [0.2.1] — 2026-10-26
 
 ### Fixed
