@@ -4,6 +4,25 @@
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-10-26
+
+### Added
+
+- **遥测 v2：CLI/MCP 路径逐条落盘。** 此前 `writeLog` 的两个调用点都只在 pi 扩展代码路径内，而 pi 自内置 MCP 起走的是 `server.mjs` spawn `node 核心.ts '{json}'`（CLI 路径）⇒ 生产搜索一行遥测都不写（本机实测：10-03…10-25 零样本，23 天）。现在两条路径共用同一装配点 `buildSearchLogEntry`；每行新增 `v`(=2) / `via`(mcp|cli|pi|test) / `version` / `providers`（当次四家 provider 配置态）/ 各层 `skip_reason` / `final.wall_ms`（端到端，与 Σ 各层的 `total_latency_ms` 并列）。
+- 环境变量：`SMART_WS_LOG_PATH`（落位覆盖，测试隔离用）、`SMART_WS_LOG_MAX_BYTES`（默认 8 MiB；超限 rename 成带时间戳的兄弟文件，**不删任何历史行**）、`SMART_WS_LOG_STALE_DAYS`（默认 7；日志陈旧时 stderr 告警）、`SMART_WS_VIA`（来源标签，server 注入 `mcp`）、`SMART_WS_CONFIG_PATH`（凭据 config 覆盖位）。
+
+### Changed
+
+- **日志落位迁出 `~/.pi/log/`** → `~/.local/state/smart-web-search/`（尊重 `XDG_STATE_HOME`）。本工具是 10 家客户端共用的 MCP server，不再寄生 pi 目录。首次运行把旧位置历史文件整体 rename 迁入（不覆盖、不删）；keenable 429 节流状态文件同迁。
+- keenable 429 冷却判定收口成一条谓词：**缺 client → `skipped(disabled)`，只有无 key 的公共层才看冷却文件**。此前 CLI 路径不判 key，公共层写下的冷却会把认证层调用也误跳；pi 路径在 keenable 未启用时以 `TypeError` 冒充 `status:"error"`（"没配"被记成"失败"）。
+- L1 并行调用、`stop_reason`/`sub_providers` 装饰、winner 选择抽为 `runL1` / `pickAnswer` 单源——此前 pi 与 CLI 各写一份且已经漂移，行为基线取生产一直在跑的 CLI 判据。
+
+### Fixed
+
+- `stop_reason` 不再覆盖 skip 行：旧装饰段无条件把 L1 两条目写成 `"ok"`，本机历史数据里有 58 行 `status:"skipped"` 却带 `stop_reason:"ok"`。skip 的原因改由独立字段 `skip_reason`（`hint | throttled | satisfied | disabled | not_tried`）承载。
+- e2e 不再污染生产遥测日志（此前每跑一次就往真落位追加快照行）；并新增 CLI 模式场景断言"一次搜索恰好一行"——缺这条回归闸正是 23 天零样本无人察觉的根因。
+- 核心 `.ts` 的 `const VERSION` 与 `pyproject.toml` 版本由测试钉住（遥测行的 `version` 字段是双写，漂移即红）。
+
 ## [0.2.2] — 2026-10-26
 
 ### Fixed
