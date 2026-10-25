@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-10-26
+
+### Fixed
+
+- **工具调用无限静默（"卡住只能手动取消"）根治**：`server.mjs` 的 `runCoreOnce` 加看门狗——核心子进程超过 120s（`SMART_WS_WATCHDOG_MS` 可调）必被 SIGKILL 并回明确 `isError` 结果；QoderCN 等无自动超时的客户端不再无限等待。
+- 处理 `notifications/cancelled`：用户取消后杀掉对应核心子进程（省资源），并按 MCP 规范不再回包。
+- `tools/call` 收包 / 回包 / 取消 / 看门狗触发全部写 stderr 诊断行——下次异常可直接区分"请求没进 server"与"响应没发出"。
+- 级联超时预算收紧：L1 wigolo 90→45s、L2/L3 30→20s，最坏链路 105s < 120s 看门狗，健康慢调用不会被误杀。
+
+### Changed
+
+- **发布包自洽**：`server.py` 删除"真源仓路径优先"的静默降级，发布包只使用包内副本；`SMART_WEB_SEARCH_SERVER` 环境变量保留为显式开发通道。
+
 ## [0.2.0] — 2026-10-02
 
 ### Fixed
