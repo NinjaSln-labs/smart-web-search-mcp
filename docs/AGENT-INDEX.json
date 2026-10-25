@@ -106,7 +106,7 @@
     "configFile": "~/.pi/agent/extensions/smart-web-search-mcp.config.json",
     "optional": true
   },
-  "logs": "~/.pi/log/smart_web_search.jsonl (set SMART_WS_LOG_RAW=0 to strip raw_text)",
+  "logs": "~/.local/state/smart-web-search/smart_web_search.jsonl (v2; SMART_WS_LOG_PATH to override, SMART_WS_LOG_RAW=0 to strip raw_text, SMART_WS_LOG_MAX_BYTES=8MiB rotation)",
   "docs": {
     "index": "https://ninjasln-labs.github.io/smart-web-search-mcp/",
     "install": "https://ninjasln-labs.github.io/smart-web-search-mcp/INSTALL.md",

@@ -31,7 +31,11 @@ L3  serper (Google; 一次性 2500 免费, 之后按量付费)             无�
 
 ## 状态日志
 
-JSONL 逐条落盘 `~/.pi/log/smart_web_search.jsonl`：`ts / request_id / input / chain[] / final`。这是路由策略调优的源数据。设置 `SMART_WS_LOG_RAW=0` 可在落盘前剥离各层的 raw_text 全文（防膨胀，指标保留）。
+JSONL 逐条落盘 `~/.local/state/smart-web-search/smart_web_search.jsonl`（v2；`SMART_WS_LOG_PATH` 可覆盖，旧 `~/.pi/log/` 历史首次运行自动迁入）：
+`v / ts / request_id / via / version / input / hints / providers / chain[] / final`。**pi 与 CLI/MCP 两条路径同一条装配点**，每条搜索一行。
+这是路由策略调优的源数据：`chain[]` 各层带 `skip_reason`（hint/throttled/satisfied/disabled/not_tried），`providers` 记录当次四个 provider 的配置态，
+`final` 同时给 `total_latency_ms`（Σ 各层）与 `wall_ms`（端到端，L1 并行时小于 Σ）。
+`SMART_WS_LOG_RAW=0` 落盘前剥各层 raw_text（防膨胀，指标保留）；超 `SMART_WS_LOG_MAX_BYTES`（默认 8MiB）rename 成带时间戳兄弟文件，**永不删**。
 
 ## 工具参数（`smart_web_search`）
 
@@ -58,4 +62,4 @@ key 优先级：config 显式 `key` > 环境变量 > `~/.cursor/mcp.json` / `~/.
 
 ## 页脚与日志
 
-每次调用的文本输出以一行页脚收尾：`from L<n> <provider> | kept X of Y | dedup: R→D（L1 有重复时） | layers: <各层(状态 条数)> | <耗时>ms`——即路由决策的摘要视图；完整细节（含各层 raw_text、usage、engine_pool）只落 `~/.pi/log/smart_web_search.jsonl`，不进工具返回值。路由判定（充足性/升层）仍按各层原始 result_count，不受展示层去重影响。
+每次调用的文本输出以一行页脚收尾：`from L<n> <provider> | kept X of Y | dedup: R→D（L1 有重复时） | layers: <各层(状态 条数)> | <耗时>ms`——即路由决策的摘要视图；完整细节（含各层 raw_text、usage、engine_pool、skip_reason）只落遥测 JSONL（见上「状态日志」节），不进工具返回值。路由判定（充足性/升层）仍按各层原始 result_count，不受展示层去重影响。

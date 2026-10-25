@@ -6,7 +6,9 @@ dsh patch 追加。用 monkeypatch 将 home() 指向 tmp_path，隔离用户真�
 """
 
 import json
+import re
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -307,3 +309,14 @@ def test_main_agents_subset(fake_home):
     assert ai.main(["--agents", "commandcode"]) == 0
     data = json.loads((fake_home / ".commandcode" / "mcp.json").read_text(encoding="utf-8"))
     assert ai.SERVER_NAME in data["mcpServers"]
+
+
+def test_version_field_matches_pyproject():
+    """遥测 v2 每行带 version——核心 .ts 裸跑不经打包，拿不到 pyproject，只能双写。
+    这条测试就是那根钉子：漂移即红（仓内与公开仓两种布局都是 root 下同级文件）。"""
+    root = Path(__file__).resolve().parents[1]
+    py_ver = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+    ts_src = (root / "smart-web-search-mcp.ts").read_text(encoding="utf-8")
+    m = re.search(r'^const VERSION = "([^"]+)"', ts_src, re.M)
+    assert m, "smart-web-search-mcp.ts 缺 const VERSION"
+    assert m.group(1) == py_ver, f"版本漂移：.ts={m.group(1)} pyproject={py_ver}"

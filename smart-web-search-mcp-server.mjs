@@ -23,7 +23,8 @@
 //
 // 凭据：与各端 pi 扩展共用同一套 env/vault 单源（SERPER/TINYFISH/TAVILY/KEENABLE_API_KEY）；
 //       config 读 pi 扩展的 ~/.pi/agent/extensions/smart-web-search-mcp.config.json（热重载同 pi 端）。
-// 日志：遥测仍写 ~/.pi/log/smart_web_search.jsonl（与 pi 端共享）；本 server 自身诊断走 stderr。
+// 日志：遥测 v2 由 spawn 出的核心子进程逐条落盘（默认 ~/.local/state/smart-web-search/smart_web_search.jsonl，
+//       SMART_WS_LOG_PATH 可覆盖；行带 via:"mcp"）；本 server 自身诊断走 stderr。
 // 依赖：Node ≥22.7（内置 TS strip-only）；L1 wigolo 需已安装（npm i -g wigolo），缺失时自动降级。
 
 import { fileURLToPath } from "node:url";
@@ -57,7 +58,9 @@ function runCoreOnce(searchParams, reqId) {
 	return new Promise((resolve, reject) => {
 		const cp = spawn(process.execPath, [join(__dirname, "smart-web-search-mcp.ts"), JSON.stringify(searchParams)], {
 			stdio: ["pipe", "pipe", "pipe"],
-			env: process.env, // 透传宿主 env：vault 软链的 SERPER/TINYFISH/TAVILY/KEENABLE_API_KEY 由此可见
+			// 透传宿主 env：vault 软链的 SERPER/TINYFISH/TAVILY/KEENABLE_API_KEY 由此可见；
+			// SMART_WS_VIA 给子进程的遥测行打上来源=mcp（区分人工 CLI 跑与客户端流量）
+			env: { ...process.env, SMART_WS_VIA: "mcp" },
 		});
 		const entry = { cp, killed: null };
 		inflight.set(reqId, entry);

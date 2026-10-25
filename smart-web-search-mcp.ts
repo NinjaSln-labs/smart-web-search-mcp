@@ -7,7 +7,7 @@
  *   L2 tinyfish (wallet 消耗) → tavily (1000/月免费)  串行：tinyfish error/0 结果才升 tavily
  *   L3 serper (Google, 一次性 2500 免费后付费) → 不论结果如何都返回 (无条件兜底)
  *
- * 路由规则 v0 (用 1-2 周后根据 ~/.pi/log/smart_web_search.jsonl 调优):
+ * 路由规则 v0 (用 1-2 周后按遥测 JSONL 调优; t000004 门槛＝v2 且 via∈{mcp,cli} 攒够 200 条):
  *   - LLM 显式 intent=news/paper/code/research → 直跳特定层
  *   - query 含 [今天/最新/本周/news] → 优先 tinyfish (L2) 的新闻能力
  *   - query 含 [arxiv/paper/论文]    → 优先 tinyfish L2 (domain_type=research_paper)
@@ -16,10 +16,14 @@
  *   - L2 (tinyfish) error/0     → L2 内串行升 tavily
  *   - L2 仍不满足              → 无条件升 L3 serper (兜底; 烧 serper 查询额度)
  *
- * **详尽状态日志** 写到 ~/.pi/log/smart_web_search.jsonl — 这是后续优化策略的源数据。
- * 每行 JSONL: ts / request_id / input / chain[] / final
- *   chain[]: 每层的 provider/tool/params/result/status/latency/credits
- *   final: stopped_at / total_credits / total_latency
+ * **详尽状态日志**（遥测 v2）每条搜索落一行 JSONL — 这是路由策略调优的唯一源数据，
+ * pi 路径与 CLI/MCP 路径共用同一装配点（v1 时代只有 pi 写，10-02 转内置 MCP 后生产流量零样本）。
+ * 默认 ~/.local/state/smart-web-search/smart_web_search.jsonl（SMART_WS_LOG_PATH 覆盖；首次自动迁入旧 ~/.pi/log 历史文件）
+ * 每行: v / ts / request_id / tool / via / version / input / hints / providers / chain[] / final
+ *   chain[]: 每层的 provider/tool/params/result{status,latency_ms,credits_used,skip_reason,raw_text,...}
+ *   final: stopped_at / output_mode / total_latency_ms(Σ各层) / wall_ms(端到端) / total_credits_used / l1_sufficient / l2_sufficient / l1_status
+ * 体积: 超 SMART_WS_LOG_MAX_BYTES(默认 8MiB) rename 成带时间戳的兄弟文件，永不删；
+ *       SMART_WS_LOG_RAW=0 剥各层 raw_text；SMART_WS_LOG_STALE_DAYS(默认 7) 日志陈旧时 stderr 告警。
  *
  * **不**写路由器对 LLM 透明路由的"全自动"工具 — 让 LLM 显式看到 chain 元信息
  * 这样 LLM 能感知"我的 L1 失败了，下次直接 L2"，也方便事后看 LLM 怎么用。
@@ -34,8 +38,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, readFileSync, appendFileSync, mkdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, appendFileSync, mkdirSync, renameSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 
@@ -67,10 +71,19 @@ const WIGOLO_BIN_CANDIDATES: ReadonlyArray<{ cmd: string; args: string[]; shell?
 		]
 	: [{ cmd: "wigolo", args: [] }, { cmd: "npx", args: ["-y", "wigolo"] }];
 
-const LOG_PATH = join(homedir(), ".pi", "log", "smart_web_search.jsonl");
-const LOG_DIR = join(homedir(), ".pi", "log");
+const VERSION = "0.3.0";
+const LOG_SCHEMA_V = 2;
+
+// 运行期状态目录：XDG state。日志与 throttle 状态原本住 pi 专属的 ~/.pi/log/，
+// 但本工具现在是 10 家客户端共用的 MCP server（d000003 起 pi 也走内置 MCP），不再寄生 pi 目录。
+function stateDir(): string {
+	return process.env.XDG_STATE_HOME || join(homedir(), ".local", "state");
+}
+const LEGACY_LOG_PATH = join(homedir(), ".pi", "log", "smart_web_search.jsonl");
+const LOG_PATH = process.env.SMART_WS_LOG_PATH || join(stateDir(), "smart-web-search", "smart_web_search.jsonl");
+const LOG_DIR = dirname(LOG_PATH);
 // Keenable public tier (no key): auto-throttle on 429 to respect the 1K/hour shared limit
-const KEENABLE_THROTTLE_PATH = join(homedir(), ".pi", "log", "keenable_throttle");
+const KEENABLE_THROTTLE_PATH = join(LOG_DIR, "keenable_throttle");
 
 // ═══════════════════════════════════════════════════════════════════════
 // Layer 1: Wigolo stdio MCP client
@@ -419,7 +432,9 @@ interface SmartConfig {
 	serper?: SmartProviderConfig;
 }
 
-const SMART_CONFIG_PATH = join(homedir(), ".pi", "agent", "extensions", "smart-web-search-mcp.config.json");
+// SMART_WS_CONFIG_PATH：测试/多实例覆盖位（e2e 用它指向 0600 临时副本，不改生产凭据文件）
+const SMART_CONFIG_PATH = process.env.SMART_WS_CONFIG_PATH
+	|| join(homedir(), ".pi", "agent", "extensions", "smart-web-search-mcp.config.json");
 
 // 优化4：resolver 每次调用都 existsSync+readFileSync 小 JSON（cursor mcp.json 等）
 // ——按 mtime 缓存，配置变更（mtime 变）自动失效，与 clients 热重载语义一致。
@@ -552,12 +567,45 @@ function isKeenableThrottled(): boolean {
 // JSONL logger
 // ═══════════════════════════════════════════════════════════════════════
 
+let logMigrated = false;
+
 function ensureLogDir(): void {
 	try { mkdirSync(LOG_DIR, { recursive: true }); } catch {}
+	if (logMigrated) return;
+	logMigrated = true;
+	// 落位迁移（v1→v2）：历史样本是路由调优的对照基线，整体 rename 到新默认位置，
+	// 新位置已有文件则不动（不覆盖、不删）。rename 原子 ⇒ 并发 spawn 只有一个成功。
+	// 只搬给**默认**位置：设了 SMART_WS_LOG_PATH（测试隔离用）就不动历史文件，
+	// 否则一次带临时路径的运行会把生产历史整个挪走、原址清空。
+	try {
+		if (!process.env.SMART_WS_LOG_PATH && !existsSync(LOG_PATH) && existsSync(LEGACY_LOG_PATH)) {
+			renameSync(LEGACY_LOG_PATH, LOG_PATH);
+		}
+	} catch {}
+}
+
+// 落盘前闸：体积轮转 + 陈旧自观测。任何异常都吞掉——遥测坏了不能连带搜索失败。
+let staleWarned = false;
+
+function logPrecheck(): void {
+	try {
+		const st = statSync(LOG_PATH);
+		const staleDays = Number(process.env.SMART_WS_LOG_STALE_DAYS ?? 7);
+		if (!staleWarned && staleDays > 0 && Date.now() - st.mtimeMs > staleDays * 86_400_000) {
+			staleWarned = true;
+			process.stderr.write(`[smart_web_search] WARN: telemetry log stale since ${new Date(st.mtimeMs).toISOString()} (${LOG_PATH})\n`);
+		}
+		const cap = Number(process.env.SMART_WS_LOG_MAX_BYTES ?? 8_388_608);
+		if (cap > 0 && st.size >= cap) {
+			const stamp = new Date().toISOString().slice(0, 19).replace(/[-:]/g, "").replace("T", "-");
+			renameSync(LOG_PATH, `${LOG_PATH}.${stamp}`);
+		}
+	} catch {}
 }
 
 function writeLog(entry: Record<string, unknown>): void {
 	ensureLogDir();
+	logPrecheck();
 	try {
 		// 优化3：raw_text 全文（wigolo 大 JSON）会让 JSONL 长期膨胀。
 		// SMART_WS_LOG_RAW=0 时落盘前剥离各 chain 条目的 raw_text（省 <95% 体积，
@@ -575,6 +623,93 @@ function writeLog(entry: Record<string, unknown>): void {
 	} catch (e) {
 		process.stderr.write(`[smart_web_search] log write failed: ${e}\n`);
 	}
+}
+
+// provider 配置态 label（原在 factory 闭包内，CLI/MCP 路径拿不到 ⇒ 上移为模块级共用）
+function providerLabel(res: { enabled: boolean; key: string | null; source: string }, isKeenable = false): string {
+	if (!res.enabled) return "DISABLED (config)";
+	if (res.key) return `enabled (key: ${res.source})`;
+	return isKeenable ? "PUBLIC TIER (no key, 1K/hour limit)" : `ENABLED BUT NO KEY (set ${res.source} or edit config)`;
+}
+
+function providersSnapshot(res: {
+	keenableRes: { enabled: boolean; key: string | null; source: string };
+	tinyfishRes: { enabled: boolean; key: string | null; source: string };
+	tavilyRes: { enabled: boolean; key: string | null; source: string };
+	serperRes: { enabled: boolean; key: string | null; source: string };
+}): Record<string, string> {
+	return {
+		keenable: providerLabel(res.keenableRes, true),
+		tinyfish: providerLabel(res.tinyfishRes),
+		tavily: providerLabel(res.tavilyRes),
+		serper: providerLabel(res.serperRes),
+	};
+}
+
+// 遥测来源标签：显式 SMART_WS_VIA 一律优先（.mjs 注入 mcp、e2e 注入 test），否则按代码路径。
+function viaTag(fallback: "pi" | "cli"): string {
+	return process.env.SMART_WS_VIA || fallback;
+}
+
+interface SearchLogArgs {
+	via: "pi" | "cli";
+	requestId: string;
+	t0: number;
+	input: SearchInput;
+	maxResults: number;
+	depth: string;
+	hints: RoutingHints;
+	chain: LayerCall[];
+	stoppedAt: number;
+	outputFormat: string;
+	totalCredits: number;
+	l1Sufficient: boolean;
+	l2Sufficient: boolean;
+	l1Status: string;
+	providers: Record<string, string>;
+}
+
+/**
+ * 遥测 v2 条目装配 + L1 装饰——两条执行路径共用同一函数、传同一 chain 引用。
+ * 旧 pi 版在 execute() 里内联装配并把 stop_reason 无条件写成 "ok"，
+ * 把 status==="skipped" 的 L1 条目也盖掉（实况污染 58 行）⇒ 装饰加守卫，skip 另由 skip_reason 承载。
+ */
+function buildSearchLogEntry(a: SearchLogArgs): Record<string, unknown> {
+	for (const c of a.chain) {
+		if (c.layer !== 1) continue;
+		c.result.sub_providers = [c.provider];
+		if (c.result.status === "skipped") continue;
+		if (a.l1Sufficient || a.l2Sufficient) c.result.stop_reason = "ok";
+	}
+	return {
+		v: LOG_SCHEMA_V,
+		ts: new Date().toISOString(),
+		request_id: a.requestId,
+		tool: "smart_web_search",
+		via: viaTag(a.via),
+		version: VERSION,
+		input: {
+			query: a.input.query, max_results: a.maxResults, intent: a.input.intent ?? null,
+			recency: a.input.recency ?? null, include_domains: a.input.include_domains ?? null,
+			depth: a.depth, location: a.input.location ?? null,
+		},
+		hints: {
+			news: a.hints.newsMode, paper: a.hints.paperMode, code: a.hints.codeMode,
+			research: a.hints.researchMode, extract_crawl: a.hints.extractCrawl, domain_type: a.hints.domainType,
+		},
+		providers: a.providers,
+		chain: a.chain,
+		final: {
+			stopped_at: a.stoppedAt,
+			output_mode: a.outputFormat,
+			total_latency_ms: a.chain.reduce((s, c) => s + c.result.latency_ms, 0),
+			wall_ms: Date.now() - a.t0,
+			total_credits_used: a.totalCredits,
+			l1_sufficient: a.l1Sufficient,
+			l2_sufficient: a.l2Sufficient,
+			l1_status: a.l1Status,
+		},
+	};
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -837,6 +972,7 @@ interface LayerCall {
 		rate_limit_headers: Record<string, string>;
 		response_bytes: number;
 		stop_reason: string | null;
+		skip_reason: string | null;
 		error: string | null;
 		raw_text: string;
 			sub_providers?: string[];
@@ -853,12 +989,13 @@ async function runLayer(
 	executor: () => Promise<{ content: MCPContentPart[]; _meta?: Record<string, unknown>; _rawHeaders?: Record<string, string> }>,
 	timeoutMs: number,
 	skipped = false,
+	skipReason: string | null = null,
 ): Promise<LayerCall> {
 	const tsStart = new Date().toISOString();
 	if (skipped) {
 		return {
 			layer, provider, tool: toolName, params,
-			result: { status: "skipped", result_count: 0, latency_ms: 0, engine_pool: null, credits_used: 0, usage: null, rate_limit_headers: {}, response_bytes: 0, stop_reason: "skipped", error: null, raw_text: "" },
+			result: { status: "skipped", result_count: 0, latency_ms: 0, engine_pool: null, credits_used: 0, usage: null, rate_limit_headers: {}, response_bytes: 0, stop_reason: "skipped", skip_reason: skipReason ?? "not_tried", error: null, raw_text: "" },
 			ts_start: tsStart, ts_end: new Date().toISOString(),
 		};
 	}
@@ -906,7 +1043,7 @@ async function runLayer(
 				engine_pool: metrics.enginePool ?? null, credits_used: creditsUsed,
 				usage,
 				rate_limit_headers: result._rawHeaders ?? {},
-				response_bytes: responseBytes, stop_reason: status === "ok" ? "ok" : null, error: null,
+				response_bytes: responseBytes, stop_reason: status === "ok" ? "ok" : null, skip_reason: null, error: null,
 				raw_text: text,
 			},
 			ts_start: tsStart, ts_end: new Date().toISOString(),
@@ -918,7 +1055,7 @@ async function runLayer(
 		const status: LayerCall["result"]["status"] = msg.includes("timeout") ? "timeout" : "error";
 		return {
 			layer, provider, tool: toolName, params,
-			result: { status, result_count: 0, latency_ms: latency, engine_pool: null, credits_used: 0, usage: null, rate_limit_headers: {}, response_bytes: 0, stop_reason: null, error: msg, raw_text: "" },
+			result: { status, result_count: 0, latency_ms: latency, engine_pool: null, credits_used: 0, usage: null, rate_limit_headers: {}, response_bytes: 0, stop_reason: null, skip_reason: null, error: msg, raw_text: "" },
 			ts_start: tsStart, ts_end: new Date().toISOString(),
 		};
 	}
@@ -980,7 +1117,7 @@ async function runL2L3(opts: {
 		chain.push(l2);
 		if (l2.result.status === "ok" && l2.result.result_count >= 1) tinyfishSufficient = true;
 	} else if (opts.tryTinyfish) {
-		chain.push(await runLayer(2, "tinyfish", "search", tinyfishParams, () => Promise.resolve({ content: [] }), 0, true));
+		chain.push(await runLayer(2, "tinyfish", "search", tinyfishParams, () => Promise.resolve({ content: [] }), 0, true, !tinyfish ? "disabled" : "satisfied"));
 	}
 
 	// ─── Layer 2b: tavily (serial, only if tinyfish didn't finish) ──
@@ -994,7 +1131,7 @@ async function runL2L3(opts: {
 		chain.push(await runLayer(2, "tavily", "tavily_search", tavilyParams,
 			() => tavily.callTool("tavily_search", tavilyParams), L3_TIMEOUT));
 	} else if (opts.tryTavily) {
-		chain.push(await runLayer(2, "tavily", "tavily_search", tavilyParams, () => Promise.resolve({ content: [] }), 0, true));
+		chain.push(await runLayer(2, "tavily", "tavily_search", tavilyParams, () => Promise.resolve({ content: [] }), 0, true, !tavily ? "disabled" : "satisfied"));
 	}
 	const l2Sufficient = tinyfishSufficient || chain.some(c => c.provider === "tavily" && c.result.status === "ok" && c.result.result_count >= 1);
 
@@ -1009,7 +1146,8 @@ async function runL2L3(opts: {
 		if (l3.result.status === "ok" && l3.result.result_count >= 1) l3.result.credits_used = 1;
 		chain.push(l3);
 	} else {
-		chain.push(await runLayer(3, "serper", "serper_search", serperParams, () => Promise.resolve({ content: [] }), 0, true));
+		chain.push(await runLayer(3, "serper", "serper_search", serperParams, () => Promise.resolve({ content: [] }), 0, true,
+			!serper ? "disabled" : !opts.trySerper ? "hint" : "satisfied"));
 	}
 
 	// L2 成功条目（tinyfish 优先，其次 tavily）
@@ -1021,6 +1159,104 @@ async function runL2L3(opts: {
 		chain.find(c => c.provider === "serper" && c.result.status === "ok" && c.result.result_count >= 1)
 		?? null;
 	return { l2Sufficient, l2Winner, l3Winner };
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// L1 + 取答案：两条执行路径单源（C3 残差——此前 CLI 与 pi 各写一份且已漂移）
+// ═══════════════════════════════════════════════════════════════════════
+
+interface L1Params {
+	wigoloParams: Record<string, unknown>;
+	keenableParams: Record<string, unknown>;
+}
+
+/** L1 请求参数。域过滤形态各家不同：wigolo 吃 string[]（裸字符串会炸 "list.map is not a function"），
+ *  keenable 只吃单个 site。 */
+function buildL1Params(input: SearchInput, hints: RoutingHints, maxResults: number): L1Params {
+	const includeArr = splitDomainList(input.include_domains);
+	const excludeArr = splitDomainList(input.exclude_domains);
+	let wigoloInclude = includeArr;
+	if (hints.codeMode && wigoloInclude.length === 0) wigoloInclude = ["github.com", "stackoverflow.com", "npmjs.com", "pypi.org"];
+	const wigoloParams: Record<string, unknown> = { query: input.query, search_depth: "fast", max_tokens_out: 4000 };
+	if (input.recency) {
+		const map: Record<string, string> = { day: "day", week: "week", month: "month", year: "year" };
+		wigoloParams.time_range = map[input.recency];
+	}
+	if (wigoloInclude.length > 0) wigoloParams.include_domains = wigoloInclude;
+	if (excludeArr.length > 0) wigoloParams.exclude_domains = excludeArr;
+	const keenableParams: Record<string, unknown> = { query: input.query, max_results: maxResults };
+	const keenableSite = firstDomainOrNull(input.include_domains);
+	if (keenableSite) keenableParams.site = keenableSite;
+	return { wigoloParams, keenableParams };
+}
+
+interface L1Outcome {
+	wigoloCall: LayerCall;
+	keenableCall: LayerCall;
+	sufficient: boolean;
+	anyDegraded: boolean;
+	combinedRaw: string;
+}
+
+/** 跑 L1（wigolo + keenable 并行）。两条判据在此收口：
+ *  · keenable 缺 client 记 skipped/disabled，不再走 `keenable!.callTool` 抛错冒充 error；
+ *  · 429 冷却只对 public tier（无 key）退让——auth tier 不写 throttle 文件，旧 CLI 判据漏看 key 会误跳。 */
+async function runL1(opts: {
+	chain: LayerCall[];
+	wigolo: WigoloClient;
+	keenable: HTTPClient | null;
+	keenableHasKey: boolean;
+	params: L1Params;
+	tryL1: boolean;
+	maxResults: number;
+	wigoloTimeout: number;
+	keenableTimeout: number;
+}): Promise<L1Outcome> {
+	const { chain, wigolo, keenable, keenableHasKey, params, tryL1, maxResults } = opts;
+	const keenableSkipped = !keenable || !tryL1 || (!keenableHasKey && isKeenableThrottled());
+	const [lw, lk] = await Promise.allSettled([
+		runLayer(1, "wigolo", "search", params.wigoloParams,
+			() => wigolo.callTool("search", params.wigoloParams), opts.wigoloTimeout, !tryL1, "hint"),
+		runLayer(1, "keenable", "keenable_search", params.keenableParams,
+			() => (keenable as HTTPClient).callTool("search", params.keenableParams), opts.keenableTimeout, keenableSkipped,
+			!keenable ? "disabled" : !tryL1 ? "hint" : "throttled"),
+	]);
+	const rejected = (r: PromiseSettledResult<LayerCall>, provider: "wigolo" | "keenable"): LayerCall => ({
+		layer: 1, provider, tool: provider === "wigolo" ? "search" : "keenable_search",
+		params: provider === "wigolo" ? params.wigoloParams : params.keenableParams,
+		result: { status: "error", result_count: 0, latency_ms: 0, engine_pool: null, credits_used: 0, usage: null, rate_limit_headers: {}, response_bytes: 0, stop_reason: null, skip_reason: null, error: r.reason?.message ?? "rejected", raw_text: "" },
+		ts_start: new Date().toISOString(), ts_end: new Date().toISOString(),
+	});
+	const wigoloCall = lw.status === "fulfilled" ? lw.value : rejected(lw, "wigolo");
+	const keenableCall = lk.status === "fulfilled" ? lk.value : rejected(lk, "keenable");
+	chain.push(wigoloCall, keenableCall);
+
+	const w = wigoloCall.result, k = keenableCall.result;
+	const anyDegraded = w.status === "degraded" || k.status === "degraded";
+	// Post-filter：provider 可能返超 maxResults（wigolo 无视该参数），只把要的量交给 LLM 看
+	const wFiltered = w.raw_text && w.result_count > 0 ? postFilterResults(w.raw_text, maxResults) : w.raw_text;
+	const kFiltered = k.raw_text && k.result_count > 0 ? postFilterResults(k.raw_text, maxResults) : k.raw_text;
+	return {
+		wigoloCall, keenableCall,
+		sufficient: w.result_count + k.result_count >= (anyDegraded ? Math.min(3, maxResults) : maxResults),
+		anyDegraded,
+		combinedRaw: [wFiltered ? "[wigolo] " + wFiltered : null, kFiltered ? "[keenable] " + kFiltered : null].filter(Boolean).join("\n\n"),
+	};
+}
+
+/** 级联取答案：L1 充足→L1；否则 L2 winner→L3 winner；全空→首个有 raw_text 的层兜底。
+ *  判据取生产在跑的 CLI 版（pi 旧版是“chain 里第一个 ok|degraded”，两者已在 L2/L3 上漂移）。 */
+function pickAnswer(chain: LayerCall[], l1: L1Outcome, l2l3: CascadeResult | null): { stoppedAt: number; winner: LayerCall | null } {
+	if (l1.sufficient) {
+		const w = l1.wigoloCall.result;
+		return { stoppedAt: 1, winner: w.result_count > 0 || w.raw_text ? l1.wigoloCall : l1.keenableCall };
+	}
+	if (l2l3?.l2Winner) return { stoppedAt: 2, winner: l2l3.l2Winner };
+	if (l2l3?.l3Winner) return { stoppedAt: 3, winner: l2l3.l3Winner };
+	for (const c of chain) {
+		if (c.result.raw_text && c.result.raw_text.length > 50) return { stoppedAt: c.layer, winner: c };
+	}
+	return { stoppedAt: 0, winner: null };
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1041,6 +1277,7 @@ async function runCliSearch(params: SearchInput): Promise<{ query: string; resul
 	const smartCfg = loadSmartConfig();
 	const clients = buildClientsForCli(smartCfg);
 	const { tinyfish, tavily, keenable, serper } = clients;
+	const providers = providersSnapshot(clients);
 
 	const chain: LayerCall[] = [];
 	const L1_TIMEOUT = 45_000;  // 级联预算 45+20+20+20=105s < server.mjs 看门狗 120s
@@ -1052,90 +1289,29 @@ async function runCliSearch(params: SearchInput): Promise<{ query: string; resul
 	if (hints.newsMode && tinyfish) tryL1 = false;
 	if (hints.paperMode && tinyfish) tryL1 = false;
 
-	// 复用与 factory 内 execute 相同的 L1/L2/L3 级联逻辑
-	// （此处为最小可用：直跑 L1 并行 + L2 串行 + L3 兜底）
-	// 完整实现见 factory 内 execute()——CLI 模式走独立精简路径，避免重复 pi 热重载机制。
-	const includeArr = splitDomainList(input.include_domains);
-	const excludeArr = splitDomainList(input.exclude_domains);
-	let wigoloInclude = includeArr;
-	if (hints.codeMode && wigoloInclude.length === 0) wigoloInclude = ["github.com", "stackoverflow.com", "npmjs.com", "pypi.org"];
-	const wigoloParams: Record<string, unknown> = { query: input.query, search_depth: "fast", max_tokens_out: 4000 };
-	if (input.recency) {
-		const map: Record<string, string> = { day: "day", week: "week", month: "month", year: "year" };
-		wigoloParams.time_range = map[input.recency];
-	}
-	if (wigoloInclude.length > 0) wigoloParams.include_domains = wigoloInclude;
-	if (excludeArr.length > 0) wigoloParams.exclude_domains = excludeArr;
-	const keenableParams: Record<string, unknown> = { query: input.query, max_results: maxResults };
-	const keenableSite = firstDomainOrNull(input.include_domains);
-	if (keenableSite) keenableParams.site = keenableSite;
-
+	// C3：L1 与取答案改用与 pi 同一批共享函数（此前两路各写一份且已漂移）
+	const l1Params = buildL1Params(input, hints, maxResults);
 	const wigoloCli = new WigoloClient();
 	// 优化1：spawn 与参数构建/keys 解析并行，缩短单次调用冷启动
 	wigoloCli.warmup();
 	// 暴露给模块顶层 CLI 路径，runCliSearch 返回后优雅关闭
 	(process as any).__wigoloCli = wigoloCli;
-	// C2：CLI 路径 keenable 与 pi 路径对齐——public tier 429 冷却期跳过（keenableRes.key 需可从 buildClientsForCli 暴露；
-	// 这里直接判 throttle 文件 + tryL1，无 key 概念简化：keenable 存在即跑，但 throttle 中跳过）
-	const keenableSkipped = !tryL1 || isKeenableThrottled();
-	const [l1W, l1K] = await Promise.allSettled([
-		runLayer(1, "wigolo", "search", wigoloParams, () => wigoloCli.callTool("search", wigoloParams), L1_TIMEOUT, !tryL1),
-		keenable
-			? runLayer(1, "keenable", "keenable_search", keenableParams, () => keenable.callTool("search", keenableParams), L1_KEENABLE_TIMEOUT, keenableSkipped)
-			: Promise.resolve({ layer: 1, provider: "keenable" as const, tool: "keenable_search", params: keenableParams,
-				result: { status: "skipped" as const, result_count: 0, latency_ms: 0, engine_pool: null, credits_used: 0, usage: null, rate_limit_headers: {}, response_bytes: 0, stop_reason: "disabled", error: null, raw_text: "" },
-				ts_start: new Date().toISOString(), ts_end: new Date().toISOString() }),
-	]);
-	chain.push(l1W.status === "fulfilled" ? l1W.value : l1W.reason as unknown as LayerCall,
-		l1K.status === "fulfilled" ? l1K.value : (l1K.reason as unknown as LayerCall));
-	const l1WigoloCall: LayerCall = l1W.status === "fulfilled" ? l1W.value : l1W.reason as unknown as LayerCall;
-	const l1KeenableCall: LayerCall = l1K.status === "fulfilled" ? l1K.value : (l1K.reason ?? { result: { status: "error" as const, error: "no keenable client" } }) as unknown as LayerCall;
-	chain[0] = l1WigoloCall; chain[1] = l1KeenableCall;
+	const l1 = await runL1({
+		chain, wigolo: wigoloCli, keenable, keenableHasKey: clients.keenableRes.key !== null,
+		params: l1Params, tryL1, maxResults, wigoloTimeout: L1_TIMEOUT, keenableTimeout: L1_KEENABLE_TIMEOUT,
+	});
+	const l1Sufficient = l1.sufficient;
+	const l1CombinedRaw = l1.combinedRaw;
+	const l1WigoloCall = l1.wigoloCall;
 
-	const l1W2 = l1WigoloCall.result, l1K2 = l1KeenableCall.result;
-	const l1CombinedCount = l1W2.result_count + l1K2.result_count;
-	const l1AnyDegraded = l1W2.status === "degraded" || l1K2.status === "degraded";
-	const l1MinResults = l1AnyDegraded ? Math.min(3, maxResults) : maxResults;
-	const l1Sufficient = l1CombinedCount >= l1MinResults;
-	const l1WFiltered = l1W2.raw_text && l1W2.result_count > 0 ? postFilterResults(l1W2.raw_text, maxResults) : l1W2.raw_text;
-	const l1KFiltered = l1K2.raw_text && l1K2.result_count > 0 ? postFilterResults(l1K2.raw_text, maxResults) : l1K2.raw_text;
-	const l1CombinedRaw = [
-		l1WFiltered ? "[wigolo] " + l1WFiltered : null,
-		l1KFiltered ? "[keenable] " + l1KFiltered : null,
-	].filter(Boolean).join("\n\n");
-
-	let stoppedAt = 0;
-	let winner: LayerCall | null = null;
-	// L1 足够
-	if (l1Sufficient) {
-		stoppedAt = 1;
-		winner = l1WigoloCall.result.result_count > 0 || l1WigoloCall.result.raw_text ? l1WigoloCall : l1KeenableCall;
-	}
-	// C3：L2/L3 级联走共享 runL2L3（与 pi execute 单源，消除双路径漂移）
-	if (stoppedAt === 0) {
-		const l2l3 = await runL2L3({
-			chain, input, hints, depth, maxResults,
-			clients: { tinyfish, tavily, serper },
-			l1Sufficient: false, tryTinyfish, tryTavily, trySerper,
-		});
-		if (l2l3.l2Winner) {
-			stoppedAt = 2;
-			winner = l2l3.l2Winner;
-		} else if (l2l3.l3Winner) {
-			stoppedAt = 3;
-			winner = l2l3.l3Winner;
-		}
-	}
-	// 若全层 error/empty/skipped，兜底取有 raw_text 的层（与 pi execute 同判据）
-	if (stoppedAt === 0) {
-		for (const c of chain) {
-			if (c.result.raw_text && c.result.raw_text.length > 50) {
-				stoppedAt = c.layer;
-				winner = c;
-				break;
-			}
-		}
-	}
+	// 级联：L1 充足时 runL2L3 只落 skip 占位行（不打网络），chain 形态与 v1 历史行一致
+	const l2l3 = await runL2L3({
+		chain, input, hints, depth, maxResults,
+		clients: { tinyfish, tavily, serper },
+		l1Sufficient, tryTinyfish, tryTavily, trySerper,
+	});
+	const l2Sufficient = l2l3.l2Sufficient;
+	const { stoppedAt, winner } = pickAnswer(chain, l1, l2l3);
 	// ─── Unified output: winner raw_text → items（与 pi execute 同一批函数）───
 	const outputFormat = input.output_format === "json" ? "json" : "text";
 	let items: UnifiedItem[] = [];
@@ -1144,7 +1320,7 @@ async function runCliSearch(params: SearchInput): Promise<{ query: string; resul
 	if (stoppedAt === 1) {
 		const merged = mergeL1Items(
 			normalizeProviderText("wigolo", l1WigoloCall.result.raw_text),
-			normalizeProviderText("keenable", l1KeenableCall.result.raw_text),
+			normalizeProviderText("keenable", l1.keenableCall.result.raw_text),
 			maxResults,
 		);
 		items = merged.items; rawCount = merged.rawCount; dedupedCount = merged.dedupedCount;
@@ -1169,6 +1345,12 @@ async function runCliSearch(params: SearchInput): Promise<{ query: string; resul
 			stoppedAt, provider: winnerProvider, dedupedCount, rawCount,
 			layersTried, totalLatencyMs: totalLatency, formatRaw, rawFallback,
 		});
+	// 遥测：CLI/MCP 路径同样逐条落盘（v1 时代只有 pi execute 写 ⇒ 10-02 起生产流量 23 天零样本）
+	writeLog(buildSearchLogEntry({
+		via: "cli", requestId, t0, input, maxResults, depth, hints, chain,
+		stoppedAt, outputFormat, totalCredits, l1Sufficient, l2Sufficient,
+		l1Status: l1WigoloCall.result.status, providers,
+	}));
 	return {
 		query: input.query,
 		results_text: resultsText,
@@ -1190,6 +1372,7 @@ function buildClientsForCli(smartCfg: SmartConfig) {
 	const keenableRes = resolveKeenableConfig(smartCfg);
 	const serperRes = resolveSerperConfig(smartCfg);
 	return {
+		tinyfishRes, tavilyRes, keenableRes, serperRes,
 		tinyfish: tinyfishRes.enabled && tinyfishRes.key ? new HTTPClient(TINYFISH_REMOTE_MCP_URL, { "X-API-Key": tinyfishRes.key }, "tinyfish") : null,
 		tavily: tavilyRes.enabled && tavilyRes.key ? new HTTPClient(TAVILY_REMOTE_MCP_URL + "?tavilyApiKey=" + encodeURIComponent(tavilyRes.key), {}, "tavily") : null,
 		keenable: keenableRes.enabled
@@ -1251,11 +1434,6 @@ export default function smartWebSearch(pi?: ExtensionAPI) {
 			serper: serperRes.enabled && serperRes.key ? new SerperClient(serperRes.key) : null,
 		};
 	}
-	function providerLabel(res: { enabled: boolean; key: string | null; source: string }, isKeenable = false): string {
-		if (!res.enabled) return "DISABLED (config)";
-		if (res.key) return `enabled (key: ${res.source})`;
-		return isKeenable ? "PUBLIC TIER (no key, 1K/hour limit)" : `ENABLED BUT NO KEY (set ${res.source} or edit config)`;
-	}
 	function configMtime(): string {
 		try { return existsSync(SMART_CONFIG_PATH) ? String(statSync(SMART_CONFIG_PATH).mtimeMs) : "absent"; }
 		catch { return "absent"; }
@@ -1269,9 +1447,10 @@ export default function smartWebSearch(pi?: ExtensionAPI) {
 			clientsMtime = m;
 			clients = buildClients(loadSmartConfig());
 			const c = clients;
-			const line = `[smart_web_search] config hot-reloaded | L1 keenable: ${providerLabel(c.keenableRes, true)} | L2 tinyfish: ${providerLabel(c.tinyfishRes)} | L2 tavily: ${providerLabel(c.tavilyRes)} | L3 serper: ${providerLabel(c.serperRes)}`;
+			const providers = providersSnapshot(c);
+			const line = `[smart_web_search] config hot-reloaded | L1 keenable: ${providers.keenable} | L2 tinyfish: ${providers.tinyfish} | L2 tavily: ${providers.tavily} | L3 serper: ${providers.serper}`;
 			console.log(line);
-			writeLog({ ts: new Date().toISOString(), tool: "smart_web_search", event: "config_reload", providers: { keenable: providerLabel(c.keenableRes, true), tinyfish: providerLabel(c.tinyfishRes), tavily: providerLabel(c.tavilyRes), serper: providerLabel(c.serperRes) } });
+			writeLog({ v: LOG_SCHEMA_V, ts: new Date().toISOString(), tool: "smart_web_search", via: viaTag("pi"), version: VERSION, event: "config_reload", providers });
 		}
 		return clients;
 	}
@@ -1321,12 +1500,15 @@ export default function smartWebSearch(pi?: ExtensionAPI) {
 		}),
 		async execute(_id, params) {
 			const input = params as SearchInput;
+			const t0 = Date.now();
 			const requestId = randomUUID();
 			const hints = inferHints(input.query, input.intent ?? null);
 			const maxResults = input.max_results ?? 5;
 			const depth = input.depth ?? "basic";
 			// Hot-reload checkpoint: rebuild clients if config file changed since last call
-			const { tinyfish, tavily, keenable, keenableRes, serper } = ensureClients();
+			const c = ensureClients();
+			const { tinyfish, tavily, keenable, keenableRes, serper } = c;
+			const providers = providersSnapshot(c);
 
 			const chain: LayerCall[] = [];
 			const L1_TIMEOUT = 45_000;  // wigolo cold start + 18 engines（预算详见 CLI 路径注释）
@@ -1344,121 +1526,25 @@ export default function smartWebSearch(pi?: ExtensionAPI) {
 			// paperMode: prefer tinyfish (has research_paper domain_type) → skip L1
 			if (hints.paperMode && tinyfish) { tryL1 = false; }
 
-			// ─── Layer 1: wigolo + keenable (parallel) ────────────────
-			// Schema notes (verified against each server's tools/list 09-06):
-			//   wigolo/tavily: include_domains/exclude_domains = string[] (a bare string crashes wigolo: "list.map is not a function")
-			//   tinyfish:      comma-separated string
-			//   keenable:      no domain list params — single `site` value only
-			const includeArr = splitDomainList(input.include_domains);
-			const excludeArr = splitDomainList(input.exclude_domains);
-			let wigoloInclude = includeArr;
-			if (hints.codeMode && wigoloInclude.length === 0) wigoloInclude = ["github.com", "stackoverflow.com", "npmjs.com", "pypi.org"];
-			const wigoloParams: Record<string, unknown> = {
-				query: input.query, search_depth: "fast", max_tokens_out: 4000,
-			};
-			if (input.recency) {
-				const map: Record<string, string> = { day: "day", week: "week", month: "month", year: "year" };
-				wigoloParams.time_range = map[input.recency];
-			}
-			if (wigoloInclude.length > 0) wigoloParams.include_domains = wigoloInclude;
-			if (excludeArr.length > 0) wigoloParams.exclude_domains = excludeArr;
+			// ─── Layer 1（与 CLI 单源：runL1 / runL2L3 / pickAnswer）───────
+			// 各 provider 参数形态见 buildL1Params 注释；此处此前手抄一份且与 CLI 判据漂移。
+			const l1 = await runL1({
+				chain, wigolo, keenable, keenableHasKey: keenableRes.key !== null,
+				params: buildL1Params(input, hints, maxResults),
+				tryL1, maxResults, wigoloTimeout: L1_TIMEOUT, keenableTimeout: L1_KEENABLE_TIMEOUT,
+			});
+			const l1Sufficient = l1.sufficient;
+			const l1CombinedRaw = l1.combinedRaw;
+			const l1WigoloCall = l1.wigoloCall;
 
-			const keenableParams: Record<string, unknown> = {
-				query: input.query, max_results: maxResults,
-			};
-			const keenableSite = firstDomainOrNull(input.include_domains);
-			if (keenableSite) keenableParams.site = keenableSite;
-
-			// ─── L1 keenable rate-limit awareness ─────────────────────
-		// Public tier: 1K req/hour shared per IP → back off on 429.
-		// Auth tier: 10 req/s per org — no practical concern.
-		// 429 时 HTTPClient 写 throttle 文件（C1：节流逻辑在 client 层，此处只读判定）
-		const keenableSkipped = !tryL1 || (keenableRes.key === null && isKeenableThrottled());
-			const [l1Wigolo, l1Keenable] = await Promise.allSettled([
-				runLayer(1, "wigolo", "search", wigoloParams,
-					() => wigolo.callTool("search", wigoloParams), L1_TIMEOUT, !tryL1)
-					.then(r => r as LayerCall),
-				Promise.resolve(runLayer(1, "keenable", "keenable_search", keenableParams,
-					() => keenable!.callTool("search", keenableParams), L1_KEENABLE_TIMEOUT, keenableSkipped)
-					.then(r => r as LayerCall)),
-			]);
-
-			// Normalize to LayerCall (reject → error result)
-			const norm = <T>(r: PromiseSettledResult<T>): T | null => r.status === "fulfilled" ? r.value : null;
-			const w = norm(l1Wigolo);
-			const k = norm(l1Keenable);
-			const err = (msg: string): LayerCall["result"] => ({ status: "error" as const, result_count: 0, latency_ms: 0, engine_pool: null, credits_used: 0, usage: null, rate_limit_headers: {}, response_bytes: 0, stop_reason: null, error: msg, raw_text: "" });
-			const l1WigoloCall: LayerCall = w ? w : { layer: 1, provider: "wigolo", tool: "search", params: wigoloParams,
-				result: err(l1Wigolo.reason?.message ?? "rejected"), ts_start: new Date().toISOString(), ts_end: new Date().toISOString() };
-			const l1KeenableCall: LayerCall = k ? k : { layer: 1, provider: "keenable", tool: "keenable_search", params: keenableParams,
-				result: err(l1Keenable.reason?.message ?? "rejected"), ts_start: new Date().toISOString(), ts_end: new Date().toISOString() };
-			chain.push(l1WigoloCall, l1KeenableCall);
-
-			// Merge L1: combine results from both providers
-			const l1W = l1WigoloCall.result;
-			const l1K = l1KeenableCall.result;
-			const l1CombinedCount = l1W.result_count + l1K.result_count;
-			const l1AnyOk = (l1W.status === "ok" || l1W.status === "degraded") && l1W.result_count > 0
-				|| (l1K.status === "ok" || l1K.status === "degraded") && l1K.result_count > 0;
-			const l1AnyDegraded = l1W.status === "degraded" || l1K.status === "degraded";
-			// Post-filter: each provider may have returned more than maxResults (wigolo ignores it);
-			// truncate raw_text so the LLM only sees what was asked for.
-			const l1WFiltered = l1W.raw_text && l1W.result_count > 0
-				? postFilterResults(l1W.raw_text, maxResults)
-				: l1W.raw_text;
-			const l1KFiltered = l1K.raw_text && l1K.result_count > 0
-				? postFilterResults(l1K.raw_text, maxResults)
-				: l1K.raw_text;
-			const l1CombinedRaw = [
-				l1WFiltered ? "[wigolo] " + l1WFiltered : null,
-				l1KFiltered ? "[keenable] " + l1KFiltered : null,
-			].filter(Boolean).join("\n\n");
-
-			// L1 sufficient: combined result count >= maxResults (or >= 3 if degraded)
-			let l1Sufficient = false;
-			const l1MinResults = l1AnyDegraded ? Math.min(3, maxResults) : maxResults;
-			if (l1CombinedCount >= l1MinResults) l1Sufficient = true;
-			if (l1Sufficient) {
-				l1WigoloCall.result.stop_reason = "ok";
-				l1KeenableCall.result.stop_reason = "ok";
-			}
-			// Tag L1 entries with sub_providers for log clarity
-			l1WigoloCall.result.sub_providers = ["wigolo"];
-			l1KeenableCall.result.sub_providers = ["keenable"];
-
-			// ─── L2/L3 级联（共享 runL2L3，与 CLI 单源）──
+			// ─── L2/L3 级联 ──
 			const l2l3 = await runL2L3({
 				chain, input, hints, depth, maxResults,
 				clients: { tinyfish, tavily, serper },
 				l1Sufficient, tryTinyfish, tryTavily, trySerper,
 			});
 			const l2Sufficient = l2l3.l2Sufficient;
-			if (l2Sufficient) {
-				// L2 补足 → L1 两个条目的 stop_reason 标记为 ok（与旧行为一致）
-				l1WigoloCall.result.stop_reason = "ok";
-				l1KeenableCall.result.stop_reason = "ok";
-			}
-
-			// ─── Pick final answer: first layer with results ──────────
-			let stoppedAt = 0;
-			let winner: LayerCall | null = null;
-			for (const c of chain) {
-				if (c.result.status === "ok" || c.result.status === "degraded") {
-					stoppedAt = c.layer;
-					winner = c;
-					break;
-				}
-			}
-			// If everything was error/empty/skipped, try the L1 raw_text anyway
-			if (stoppedAt === 0) {
-				for (const c of chain) {
-					if (c.result.raw_text && c.result.raw_text.length > 50) {
-						stoppedAt = c.layer;
-						winner = c;
-						break;
-					}
-				}
-			}
+			const { stoppedAt, winner } = pickAnswer(chain, l1, l2l3);
 			// ─── Unified output: winner raw_text → items ──────────────
 			const outputFormat = input.output_format === "json" ? "json" : "text";
 			let items: UnifiedItem[] = [];
@@ -1467,7 +1553,7 @@ export default function smartWebSearch(pi?: ExtensionAPI) {
 			if (stoppedAt === 1) {
 				const merged = mergeL1Items(
 					normalizeProviderText("wigolo", l1WigoloCall.result.raw_text),
-					normalizeProviderText("keenable", l1KeenableCall.result.raw_text),
+					normalizeProviderText("keenable", l1.keenableCall.result.raw_text),
 					maxResults,
 				);
 				items = merged.items; rawCount = merged.rawCount; dedupedCount = merged.dedupedCount;
@@ -1491,24 +1577,11 @@ export default function smartWebSearch(pi?: ExtensionAPI) {
 			const totalCredits = chain.reduce((s, c) => s + c.result.credits_used, 0);
 
 			// ─── Log ─────────────────────────────────────────────────
-			const logEntry = {
-				ts: new Date().toISOString(),
-				request_id: requestId,
-				tool: "smart_web_search",
-				input: { query: input.query, max_results: maxResults, intent: input.intent ?? null, recency: input.recency ?? null, include_domains: input.include_domains ?? null, depth, location: input.location ?? null },
-				hints: { news: hints.newsMode, paper: hints.paperMode, code: hints.codeMode, research: hints.researchMode, extract_crawl: hints.extractCrawl, domain_type: hints.domainType },
-				chain,
-				final: {
-					stopped_at: stoppedAt,
-					output_mode: outputFormat,
-					total_latency_ms: totalLatency,
-					total_credits_used: totalCredits,
-					l1_sufficient: l1Sufficient,
-					l2_sufficient: l2Sufficient,
-					l1_status: l1WigoloCall.result.status,
-				},
-			};
-			writeLog(logEntry);
+			writeLog(buildSearchLogEntry({
+				via: "pi", requestId, t0, input, maxResults, depth, hints, chain,
+				stoppedAt, outputFormat, totalCredits, l1Sufficient, l2Sufficient,
+				l1Status: l1WigoloCall.result.status, providers,
+			}));
 
 			// ─── Return to LLM ───────────────────────────────────────
 			const textCtx: TextOutputCtx = {
