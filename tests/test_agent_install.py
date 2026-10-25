@@ -8,7 +8,6 @@ dsh patch 追加。用 monkeypatch 将 home() 指向 tmp_path，隔离用户真�
 import json
 import re
 import subprocess
-import tomllib
 from pathlib import Path
 
 import pytest
@@ -315,7 +314,10 @@ def test_version_field_matches_pyproject():
     """遥测 v2 每行带 version——核心 .ts 裸跑不经打包，拿不到 pyproject，只能双写。
     这条测试就是那根钉子：漂移即红（仓内与公开仓两种布局都是 root 下同级文件）。"""
     root = Path(__file__).resolve().parents[1]
-    py_ver = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+    # 不用 tomllib（3.11+），本包 requires-python 覆盖 3.10
+    pm = re.search(r'^version = "([^"]+)"', (root / "pyproject.toml").read_text(encoding="utf-8"), re.M)
+    assert pm, "pyproject.toml 里找不到 version 行"
+    py_ver = pm.group(1)
     ts_src = (root / "smart-web-search-mcp.ts").read_text(encoding="utf-8")
     m = re.search(r'^const VERSION = "([^"]+)"', ts_src, re.M)
     assert m, "smart-web-search-mcp.ts 缺 const VERSION"
