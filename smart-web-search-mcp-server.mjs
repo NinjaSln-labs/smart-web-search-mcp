@@ -48,18 +48,36 @@ console.log = diagLog;
 const TOOL_NAME = "smart_web_search";
 let toolDescription = "";
 
-function runCoreOnce(searchParams) {
+// 看门狗：核心最坏级联 45+20+20+20=105s（.ts runL2L3/L1 超时），120s 是"健康调用绝不误杀、
+// 静默挂死必被点名"的下界。env SMART_WS_WATCHDOG_MS 覆盖。resolve(null)=请求已取消，不回包。
+const WATCHDOG_MS = Math.max(1_000, Number(process.env.SMART_WS_WATCHDOG_MS) || 120_000);
+const inflight = new Map(); // reqId -> { cp, killed }
+
+function runCoreOnce(searchParams, reqId) {
 	return new Promise((resolve, reject) => {
 		const cp = spawn(process.execPath, [join(__dirname, "smart-web-search-mcp.ts"), JSON.stringify(searchParams)], {
 			stdio: ["pipe", "pipe", "pipe"],
 			env: process.env, // 透传宿主 env：vault 软链的 SERPER/TINYFISH/TAVILY/KEENABLE_API_KEY 由此可见
 		});
+		const entry = { cp, killed: null };
+		inflight.set(reqId, entry);
 		let stdout = "";
 		let stderr = "";
+		const timer = setTimeout(() => {
+			entry.killed = "watchdog";
+			diagLog(`[smart-web-search-mcp] req ${reqId} watchdog ${WATCHDOG_MS}ms expired — killing core child`);
+			cp.kill("SIGKILL");
+		}, WATCHDOG_MS);
 		cp.stdout.on("data", (d) => { stdout += d; });
 		cp.stderr.on("data", (d) => { stderr += d; });
-		cp.on("error", reject);
+		cp.on("error", (e) => { clearTimeout(timer); inflight.delete(reqId); reject(e); });
 		cp.on("close", (code) => {
+			clearTimeout(timer);
+			inflight.delete(reqId);
+			if (entry.killed === "cancelled") return resolve(null);
+			if (entry.killed === "watchdog") {
+				return reject(new Error(`core killed by watchdog after ${WATCHDOG_MS}ms (partial stderr: ${stderr.slice(-200)})`));
+			}
 			if (code !== 0) {
 				return reject(new Error(`core exited ${code}: ${stderr.slice(-300)}`));
 			}
@@ -152,9 +170,19 @@ function handle(msg) {
 			break;
 		}
 		case "notifications/initialized":
-		case "notifications/cancelled":
 		case "notifications/progress":
 			break;
+		case "notifications/cancelled": {
+			// MCP 规范：被取消的请求 MUST NOT 再回响应；杀掉在跑的核心子进程省资源
+			const rid = msg.params?.requestId;
+			const e = rid !== undefined ? inflight.get(rid) : null;
+			if (e) {
+				e.killed = "cancelled";
+				diagLog(`[smart-web-search-mcp] req ${rid} cancelled — killing core child`);
+				e.cp.kill("SIGKILL");
+			}
+			break;
+		}
 		case "ping":
 			if (id !== undefined) send({ jsonrpc: "2.0", id, result: {} });
 			break;
@@ -168,11 +196,15 @@ function handle(msg) {
 				return;
 			}
 			// 每次调用独立 spawn 子进程跑核心（避免 pi 内 client 累积）
-			runCoreOnce(params.arguments ?? {})
+			diagLog(`[smart-web-search-mcp] req ${id} tools/call received (tool=${params.name}) — spawning core`);
+			runCoreOnce(params.arguments ?? {}, id)
 				.then((out) => {
+					if (out === null) return; // 已取消：按规范抑制回包
+					diagLog(`[smart-web-search-mcp] req ${id} core done — sending result`);
 					send({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(out, null, 2) }], isError: false } });
 				})
 				.catch((e) => {
+					diagLog(`[smart-web-search-mcp] req ${id} core failed — sending error: ${e?.message ?? e}`);
 					send({
 						jsonrpc: "2.0", id,
 						result: {

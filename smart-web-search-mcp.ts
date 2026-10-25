@@ -959,8 +959,8 @@ async function runL2L3(opts: {
 }): Promise<CascadeResult> {
 	const { chain, clients, input, hints, depth, maxResults, l1Sufficient } = opts;
 	const { tinyfish, tavily, serper } = clients;
-	const L2_TIMEOUT = 30_000;
-	const L3_TIMEOUT = 30_000;
+	const L2_TIMEOUT = 20_000;
+	const L3_TIMEOUT = 20_000;
 	const includeArr = splitDomainList(input.include_domains);
 	const excludeArr = splitDomainList(input.exclude_domains);
 
@@ -1043,7 +1043,7 @@ async function runCliSearch(params: SearchInput): Promise<{ query: string; resul
 	const { tinyfish, tavily, keenable, serper } = clients;
 
 	const chain: LayerCall[] = [];
-	const L1_TIMEOUT = 90_000;
+	const L1_TIMEOUT = 45_000;  // 级联预算 45+20+20+20=105s < server.mjs 看门狗 120s
 	const L1_KEENABLE_TIMEOUT = 15_000;
 	// L2/L3 超时在共享 runL2L3 内定义
 	let tryL1 = true, tryTinyfish = !!tinyfish, tryTavily = !!tavily;
@@ -1329,7 +1329,7 @@ export default function smartWebSearch(pi?: ExtensionAPI) {
 			const { tinyfish, tavily, keenable, keenableRes, serper } = ensureClients();
 
 			const chain: LayerCall[] = [];
-			const L1_TIMEOUT = 90_000;  // wigolo cold start + 18 engines
+			const L1_TIMEOUT = 45_000;  // wigolo cold start + 18 engines（预算详见 CLI 路径注释）
 			const L1_KEENABLE_TIMEOUT = 15_000;  // keenable is instant HTTP, no cold start
 			// L2/L3 超时在共享 runL2L3 内定义
 

@@ -4,9 +4,8 @@
 由本入口把 stdin/stdout 原样交给 server.mjs（node ≥22.7）。
 
 server 入口解析顺序：
-  1. 环境变量 SMART_WEB_SEARCH_SERVER 显式指定；
-  2. 真源仓库路径 ~/ninjasin-labs/agent-tools/smart-web-search/（存在时优先——真源机改核心 .ts 即时生效）；
-  3. 包内置副本（wheel 自带，供无仓库的机器独立运行）。
+  1. 环境变量 SMART_WEB_SEARCH_SERVER 显式指定（开发通道，指哪儿跑哪儿）；
+  2. 包内置副本（wheel 自带）——发布包只用自己的内容，不做路径拾取式降级。
 """
 
 from __future__ import annotations
@@ -24,22 +23,16 @@ def _find_server() -> Path | None:
     if env:
         p = Path(env).expanduser()
         return p if p.is_file() else None
-    candidates = [
-        Path.home() / "ninjasin-labs" / "agent-tools" / "smart-web-search" / _SERVER_NAME,  # 真源仓
-        Path(__file__).resolve().parent / _SERVER_NAME,                                        # 包内副本
-    ]
-    for c in candidates:
-        if c.is_file():
-            return c
-    return None
+    bundled = Path(__file__).resolve().parent / _SERVER_NAME
+    return bundled if bundled.is_file() else None
 
 
 def main() -> int:
     mjs = _find_server()
     if mjs is None:
         sys.stderr.write(
-            "smart-web-search-mcp: 找不到 server（设 SMART_WEB_SEARCH_SERVER=<绝对路径>，"
-            "或把真源仓放在 ~/ninjasin-labs/agent-tools/smart-web-search/）\n"
+            "smart-web-search-mcp: 找不到 server 入口（包内副本缺失；"
+            "或设 SMART_WEB_SEARCH_SERVER=<绝对路径> 指向 smart-web-search-mcp-server.mjs）\n"
         )
         return 1
     node = shutil.which("node")
