@@ -2,7 +2,11 @@
 
 ## 层级与级联策略
 
-LLM 只看到 **1 个工具** `smart_web_search`，内部按「梯次降级」路由 5 个 provider：
+LLM 看到 **2 个工具**：`smart_web_search`（搜索）与 `smart_web_fetch`（取 URL 正文）。
+
+## 搜索级联
+
+`smart_web_search` 内部按「梯次降级」路由 5 个 provider：
 
 ```
 L1  wigolo (stdio, 18 引擎, 免费) + keenable (HTTP, 免费层)   并行
@@ -28,6 +32,18 @@ L3  serper (Google; 一次性 2500 免费, 之后按量付费)             无�
 ## 每次调用返回什么
 
 结果文本 + 完整 **routing chain**（每层 provider / status / result_count / latency / credits / error），LLM 可据此学习「L1 空了下次直接 L2」。
+
+## fetch 级联（`smart_web_fetch`）
+
+```
+wigolo fetch (本地, 免费, 可渲染 JS) → keenable fetch_page_content (免费公共层)
+  → tavily extract (key) → serper scrape (key, 按页计费) → 直连 HTTP + HTML→text 兜底
+```
+
+- 任一层的正文非空即停；keenable 与搜索共用 429 冷却标记（throttled 时跳过）
+- 输出统一为 agent 可读块：`Title / URL / Via` + markdown/纯文本；`output_format=json` 给结构化 envelope
+- fetch **不写搜索遥测**（不污染 `t000004` 的 v2/search 样本计数）
+- `SMART_WS_FETCH_SKIP=wigolo,keenable,…`：排障/验证时强制跳过指定层
 
 ## 状态日志
 

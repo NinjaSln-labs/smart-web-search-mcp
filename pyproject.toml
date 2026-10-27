@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "smart-web-search-mcp"
-version = "0.3.0"
-description = "Smart Web Search MCP server — 5-provider fusion routing (wigolo+keenable → tinyfish→tavily → serper) with a one-click installer for 10 AI agent CLIs"
+version = "0.4.0"
+description = "Smart Web Search MCP server — 5-provider fusion search + agent-readable URL fetch (wigolo→keenable→tavily→serper→direct), with a one-click installer for 13 AI agent CLIs"
 readme = "README.md"
 requires-python = ">=3.10"
 # 运行时零依赖（卖点）：只由标准库写成

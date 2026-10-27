@@ -17,7 +17,7 @@
     "applicationCategory": "DeveloperApplication",
     "operatingSystem": "Windows / macOS / Linux (Python >= 3.10, Node >= 22.7)",
     "license": "https://github.com/NinjaSln-labs/smart-web-search-mcp/blob/main/LICENSE",
-    "description": "Smart Web Search MCP server：5-provider 融合搜索路由（wigolo+keenable → tinyfish→tavily → serper），一键安装器接入 10 家 AI agent",
+    "description": "Smart Web Search MCP server：5-provider 融合搜索路由（wigolo+keenable → tinyfish→tavily → serper），一键安装器接入 13 家 AI agent",
     "programmingLanguage": ["Python 3 (stdlib only)", "TypeScript (Node strip-only)"],
     "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
     "documentation": [
@@ -97,7 +97,7 @@
     <div id="landing">
       <header class="hero">
         <h1 class="title">🔍 smart-web-search-mcp</h1>
-        <p class="tagline">5-provider 融合搜索路由 MCP server — 低成本层先答 · 付费层兜底 · 一键接入 10 家 AI agent<br>
+        <p class="tagline">5-provider 融合搜索路由 MCP server — 低成本层先答 · 付费层兜底 · 一键接入 13 家 AI agent<br>
         5-provider fusion search routing for MCP — cheap layers first, paid layers as fallback.</p>
         <div class="badges">
           <span class="badge green"><b>PyPI</b> v0.1.0</span>
@@ -149,7 +149,7 @@ L3  serper (Google; 2500 一次性免费)                           无条件兜
         <div class="grid">
           <div class="card"><h3>🧭 梯次降级</h3><p>免费层并行打头，钱包层串行补位，付费层只兜底。LLM 只见 1 个工具，复杂度全在路由内。</p></div>
           <div class="card"><h3>📦 零依赖</h3><p>安装器纯 Python 标准库；MCP 核心是 Node ≥22.7 strip-only 直跑的 TS——免 esbuild、免打包。</p></div>
-          <div class="card"><h3>🤝 一键接入 10 家 agent</h3><p>pi / Cursor / cline / opencode / zcode / Qoder / mcode / commandcode / dsh / reasonix；自动探测、幂等写入、覆盖前备份。</p></div>
+          <div class="card"><h3>🤝 一键接入 13 家 agent</h3><p>pi / Cursor / cline / opencode / zcode / Qoder / mcode / commandcode / dsh / reasonix / Codex / Claude Code / Copilot CLI；自动探测、幂等写入、覆盖前备份。</p></div>
           <div class="card"><h3>🔁 spawn-per-call</h3><p>每次 tools/call 独立子进程跑完整搜索后退出——跨调用零状态累积，升级不失效。</p></div>
           <div class="card"><h3>🪫 429 自感知</h3><p>keenable 公共层 429 自动落节流标记，60s 冷却内跳过，pi / CLI 双路一致。</p></div>
           <div class="card"><h3>📊 可观测</h3><p>pi 与 CLI/MCP 两条路径同一条装配点：每次搜索逐条落盘 JSONL（含各层 skip_reason 与 provider 配置态；SMART_WS_LOG_RAW=0 可剥 raw_text），路由调优有据可依。</p></div>

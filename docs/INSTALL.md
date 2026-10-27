@@ -21,7 +21,7 @@ pip install smart-web-search-mcp
 
 安装后得到两个命令：
 
-- `smart-web-search-mcp` — MCP stdio server（各 agent 的 MCP 配置引用它）
+- `smart-web-search-mcp` — MCP stdio server（各 agent 的 MCP 配置引用它；对 LLM 暴露 `smart_web_search` + `smart_web_fetch` 两个工具）
 - `smart-web-search-install` — 一键安装器
 
 ## 一键接入 agent
@@ -34,7 +34,7 @@ smart-web-search-install --force     # 覆盖已存在条目（覆盖前备份 .
 smart-web-search-install --agents pi,cline,dsh   # 只装指定几家
 ```
 
-支持 10 家：pi（≥0.99.0 内置 MCP，旧扩展自动迁移）/ Cursor / Cline / opencode / zcode / Qoder CLI / mcode（MiniMax Code）/ commandcode / dsh / reasonix。未安装的自动跳过。
+支持 13 家：pi（≥0.99.0 内置 MCP，旧扩展自动迁移）/ Cursor / Cline / opencode / zcode / Qoder CLI / mcode（MiniMax Code）/ commandcode / dsh / reasonix / Codex CLI / Claude Code / GitHub Copilot CLI。未安装的自动跳过。
 
 ## 手动配置（任意支持 stdio MCP 的客户端）
 

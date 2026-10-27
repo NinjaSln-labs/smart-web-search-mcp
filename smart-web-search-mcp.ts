@@ -1,7 +1,10 @@
 /**
- * Smart Web Search — 5-provider fusion router for pi
+ * Smart Web Search — 5-provider fusion search + fetch (MCP/CLI core)
  *
- * 暴露给 LLM 的工具: `smart_web_search` (1 个)
+ * 本文件是纯 CLI 引擎：由 smart-web-search-mcp-server.mjs 以 spawn-per-call 拉起，
+ * pi 等客户端统一经内置 MCP 使用（不再提供 pi 扩展模式）。
+ *
+ * 暴露给 LLM 的工具 (2 个): `smart_web_search`（5-provider 搜索）+ `smart_web_fetch`（URL→可读正文）
  * 内部按"梯次降级"策略依次调:
  *   L1 wigolo + keenable 并行 (均免费) → 任一足够则停，否则升 L2
  *   L2 tinyfish (wallet 消耗) → tavily (1000/月免费)  串行：tinyfish error/0 结果才升 tavily
@@ -17,7 +20,7 @@
  *   - L2 仍不满足              → 无条件升 L3 serper (兜底; 烧 serper 查询额度)
  *
  * **详尽状态日志**（遥测 v2）每条搜索落一行 JSONL — 这是路由策略调优的唯一源数据，
- * pi 路径与 CLI/MCP 路径共用同一装配点（v1 时代只有 pi 写，10-02 转内置 MCP 后生产流量零样本）。
+ * CLI/MCP 路径共用同一装配点（v1 时代只有已退役的 pi 扩展写，10-02 转内置 MCP 后生产流量零样本）。
  * 默认 ~/.local/state/smart-web-search/smart_web_search.jsonl（SMART_WS_LOG_PATH 覆盖；首次自动迁入旧 ~/.pi/log 历史文件）
  * 每行: v / ts / request_id / tool / via / version / input / hints / providers / chain[] / final
  *   chain[]: 每层的 provider/tool/params/result{status,latency_ms,credits_used,skip_reason,raw_text,...}
@@ -28,31 +31,18 @@
  * **不**写路由器对 LLM 透明路由的"全自动"工具 — 让 LLM 显式看到 chain 元信息
  * 这样 LLM 能感知"我的 L1 失败了，下次直接 L2"，也方便事后看 LLM 怎么用。
  *
- * 各 provider 的 client 都内联在本文件（避免跨扩展 import 耦合）。
+ * 各 provider 的 client 都内联在本文件（避免跨模块 import 耦合）。
  * tinyfish 和 tavily 用相同模式 (Streamable HTTP MCP)，代码基本一致。
  * wigolo 用 stdio MCP (spawn npx -y wigolo)。serper 用纯 REST (POST + X-API-KEY)。
  *
  * @see docs/llm/smart-web-search.md (本仓库)
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, readFileSync, appendFileSync, mkdirSync, renameSync, statSync } from "node:fs";
+import { existsSync, readFileSync, appendFileSync, writeFileSync, mkdirSync, renameSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
-
-// 本地实现（等价原 @earendil-works/pi-ai 的 StringEnum）——核心只需 typebox，去掉 pi-ai 重依赖。
-// 用 Type.Unsafe 产出 Google 等 provider 友好的 string-enum schema（不用 anyOf/const）。
-function StringEnum(values: readonly string[], options?: { description?: string; default?: string }) {
-	return Type.Unsafe({
-		type: "string",
-		enum: values,
-		...(options?.description && { description: options.description }),
-		...(options?.default && { default: options.default }),
-	});
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 // Constants
@@ -62,6 +52,7 @@ const TAVILY_REMOTE_MCP_URL = "https://mcp.tavily.com/mcp/";
 const TINYFISH_REMOTE_MCP_URL = "https://agent.tinyfish.ai/mcp";
 const KEENABLE_MCP_URL = "https://api.keenable.ai/mcp";
 const SERPER_SEARCH_URL = "https://google.serper.dev/search";
+const SERPER_SCRAPE_URL = "https://scrape.serper.dev";
 
 const WIGOLO_BIN_CANDIDATES: ReadonlyArray<{ cmd: string; args: string[]; shell?: boolean }> = process.platform === "win32"
 	? [
@@ -71,11 +62,11 @@ const WIGOLO_BIN_CANDIDATES: ReadonlyArray<{ cmd: string; args: string[]; shell?
 		]
 	: [{ cmd: "wigolo", args: [] }, { cmd: "npx", args: ["-y", "wigolo"] }];
 
-const VERSION = "0.3.0";
+const VERSION = "0.4.0";
 const LOG_SCHEMA_V = 2;
 
 // 运行期状态目录：XDG state。日志与 throttle 状态原本住 pi 专属的 ~/.pi/log/，
-// 但本工具现在是 10 家客户端共用的 MCP server（d000003 起 pi 也走内置 MCP），不再寄生 pi 目录。
+// 但本工具现在是 13 家客户端共用的 MCP server（d000003 起 pi 也走内置 MCP），不再寄生 pi 目录。
 function stateDir(): string {
 	return process.env.XDG_STATE_HOME || join(homedir(), ".local", "state");
 }
@@ -280,8 +271,13 @@ class HTTPClient {
 			throw new Error(`${this.label} MCP error ${retry.status}: ${(await retry.text().catch(() => "")).slice(0, 500)}`);
 		}
 		// Rate-limit: write throttle marker so future calls back off
+		// 注意：必须覆盖写（writeFileSync）——appendFileSync 会把多个时间戳拼成一串，
+		// 读侧 Number() 得天文数字 ⇒ 冷却判定恒真、公共层被永久跳过。
 		if (resp.status === 429 && this.throttleFile) {
-			try { appendFileSync(this.throttleFile, String(Date.now()), "utf8"); } catch {}
+			try {
+				mkdirSync(dirname(this.throttleFile), { recursive: true });
+				writeFileSync(this.throttleFile, String(Date.now()), "utf8");
+			} catch {}
 		}
 		throw new Error(`${this.label} MCP error ${resp.status}: ${(await resp.text().catch(() => "")).slice(0, 500)}`);
 	}
@@ -402,6 +398,23 @@ class SerperClient {
 		const hdrs: Record<string, string> = {};
 		resp.headers.forEach((v, k) => { const lk = k.toLowerCase(); if (lk.includes("ratelimit") || lk.includes("remaining") || lk.includes("quota")) hdrs[k] = v; });
 		return { content: [{ type: "text", text: JSON.stringify({ results }) }], _rawHeaders: hdrs };
+	}
+
+	// fetch 专用：scrape.serper.dev（按页计费，2 credits/page 量级）
+	async scrape(url: string, timeoutMs: number): Promise<{ text: string; title: string; credits: number | null }> {
+		const resp = await fetch(SERPER_SCRAPE_URL, {
+			method: "POST",
+			headers: { "X-API-KEY": this.apiKey, "Content-Type": "application/json", Accept: "application/json" },
+			body: JSON.stringify({ url }),
+			signal: AbortSignal.timeout(timeoutMs),
+		});
+		if (!resp.ok) throw new Error(`serper scrape HTTP ${resp.status}: ${(await resp.text().catch(() => "")).slice(0, 300)}`);
+		const data = await resp.json().catch(() => null) as { text?: string; markdown?: string; metadata?: { title?: string }; credits?: number } | null;
+		return {
+			text: data?.text ?? data?.markdown ?? "",
+			title: data?.metadata?.title ?? "",
+			credits: typeof data?.credits === "number" ? data.credits : null,
+		};
 	}
 }
 
@@ -555,11 +568,19 @@ function resolveSerperConfig(smartCfg: SmartConfig): { enabled: boolean; key: st
 
 // ─── Keenable public-tier throttle（429 冷却判定，pi/CLI 双路共用）────
 // 429 时 HTTPClient.callTool 写 KEENABLE_THROTTLE_PATH（时间戳）；60s 冷却内跳过 keenable。
+// 只认单个毫秒时间戳：拼接（t000018 原缺陷）会拼成天文数字，Date.now()-ts 恒负 ⇒ 冷却永久为真；
+// 未来值同理不可信。两种都按脏文件处理、不算冷却。
+export function throttleTsFrom(raw: string, now: number): number | null {
+	const ts = Number(raw.trim());
+	if (!Number.isFinite(ts) || ts <= 0 || ts > now + 5_000) return null;
+	return ts;
+}
+
 function isKeenableThrottled(): boolean {
 	try {
 		if (!existsSync(KEENABLE_THROTTLE_PATH)) return false;
-		const ts = Number(readFileSync(KEENABLE_THROTTLE_PATH, "utf8"));
-		return Date.now() - ts < 60_000; // 60s cooldown
+		const ts = throttleTsFrom(readFileSync(KEENABLE_THROTTLE_PATH, "utf8"), Date.now());
+		return ts !== null && Date.now() - ts < 60_000; // 60s cooldown
 	} catch { return false; }
 }
 
@@ -647,12 +668,12 @@ function providersSnapshot(res: {
 }
 
 // 遥测来源标签：显式 SMART_WS_VIA 一律优先（.mjs 注入 mcp、e2e 注入 test），否则按代码路径。
-function viaTag(fallback: "pi" | "cli"): string {
+function viaTag(fallback: string): string {
 	return process.env.SMART_WS_VIA || fallback;
 }
 
 interface SearchLogArgs {
-	via: "pi" | "cli";
+	via: string;
 	requestId: string;
 	t0: number;
 	input: SearchInput;
@@ -1383,7 +1404,362 @@ function buildClientsForCli(smartCfg: SmartConfig) {
 	};
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// Fetch：单 URL 正文抓取（wigolo → keenable → tavily → serper → direct）
+// 输出面向 agent：text 模式直接是「Title/URL/Via + markdown」可读块；
+// output_format=json 才给结构化 envelope。不写搜索遥测，避免污染 v2/search 样本。
+// ═══════════════════════════════════════════════════════════════════════
+
+interface FetchInput {
+	url: string;
+	max_chars?: number;
+	output_format?: string;
+}
+
+interface FetchDeps {
+	wigolo: WigoloClient;
+	keenable: HTTPClient | null;
+	tavily: HTTPClient | null;
+	serper: SerperClient | null;
+	keenableHasKey: boolean;
+}
+
+interface FetchResult {
+	url: string;
+	final_url: string;
+	title: string;
+	content: string;
+	content_format: "markdown" | "text";
+	via: string;
+	http_status: number | null;
+	truncated: boolean;
+	elapsed_ms: number;
+	meta: Record<string, unknown>;
+}
+
+const FETCH_DEFAULT_MAX_CHARS = 20_000;
+const FETCH_MIN_MAX_CHARS = 500;
+const FETCH_MAX_MAX_CHARS = 200_000;
+const FETCH_WIGOLO_TIMEOUT = 45_000;
+const FETCH_HTTP_TIMEOUT = 20_000;
+const FETCH_MAX_BYTES = 2 * 1024 * 1024;
+const FETCH_UA = `Mozilla/5.0 (compatible; smart-web-search/${VERSION}; +https://github.com/NinjaSln-labs/smart-web-search-mcp)`;
+
+function normalizeFetchInput(input: FetchInput): { url: string; maxChars: number; outputFormat: "text" | "json" } {
+	const raw = String(input?.url ?? "").trim();
+	if (!raw) throw new Error("url is required");
+	const u = new URL(raw);
+	if (u.protocol !== "http:" && u.protocol !== "https:") {
+		throw new Error(`unsupported URL scheme: ${u.protocol}（只支持 http/https）`);
+	}
+	const n = Number(input.max_chars ?? FETCH_DEFAULT_MAX_CHARS);
+	return {
+		url: u.toString(),
+		maxChars: Number.isFinite(n)
+			? Math.min(Math.max(Math.trunc(n), FETCH_MIN_MAX_CHARS), FETCH_MAX_MAX_CHARS)
+			: FETCH_DEFAULT_MAX_CHARS,
+		outputFormat: input.output_format === "json" ? "json" : "text",
+	};
+}
+
+function timeoutRace<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+	let timer: NodeJS.Timeout | null = null;
+	return Promise.race([
+		p,
+		new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`${label} timeout ${ms}ms`)), ms); }),
+	]).finally(() => { if (timer) clearTimeout(timer); });
+}
+
+function truncateContent(text: string, max: number): { text: string; truncated: boolean } {
+	if (text.length <= max) return { text, truncated: false };
+	const slice = text.slice(0, max);
+	const cut = Math.max(slice.lastIndexOf("\n\n"), slice.lastIndexOf("\n"));
+	return { text: (cut > max * 0.6 ? slice.slice(0, cut) : slice).trimEnd(), truncated: true };
+}
+
+const HTML_ENTITIES: Record<string, string> = {
+	amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ",
+	mdash: "—", ndash: "–", hellip: "…", rsquo: "’", lsquo: "‘", ldquo: "“", rdquo: "”",
+	copy: "©", reg: "®", trade: "™",
+};
+
+function decodeHtmlEntities(s: string): string {
+	return s.replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z]+);/g, (m, ent: string) => {
+		if (HTML_ENTITIES[ent] !== undefined) return HTML_ENTITIES[ent];
+		const hex = ent.toLowerCase().startsWith("#x");
+		const cp = hex ? parseInt(ent.slice(2), 16) : (ent.startsWith("#") ? parseInt(ent.slice(1), 10) : NaN);
+		return Number.isFinite(cp) && cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : m;
+	});
+}
+
+function htmlToText(html: string): { title: string; text: string } {
+	const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+	const title = decodeHtmlEntities((titleMatch?.[1] ?? "").replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
+	const cleaned = html
+		.replace(/<!--[\s\S]*?-->/g, "")
+		.replace(/<(script|style|noscript|template|svg|iframe)[^>]*>[\s\S]*?<\/\1>/gi, "");
+	const scope = cleaned.match(/<article[^>]*>([\s\S]*?)<\/article>/i)?.[1]
+		?? cleaned.match(/<main[^>]*>([\s\S]*?)<\/main>/i)?.[1]
+		?? cleaned.match(/<body[^>]*>([\s\S]*?)<\/body>/i)?.[1]
+		?? cleaned;
+	const text = decodeHtmlEntities(
+		scope
+			.replace(/<\s*br\s*\/?>/gi, "\n")
+			.replace(/<\s*\/\s*(p|div|section|article|main|header|footer|h[1-6]|li|ul|ol|tr|td|blockquote|pre)\s*>/gi, "\n")
+			.replace(/<[^>]+>/g, " ")
+	)
+		.replace(/[ \t\f\v]+/g, " ")
+		.replace(/ *\n */g, "\n")
+		.replace(/\n{3,}/g, "\n\n")
+		.trim();
+	return { title, text };
+}
+
+async function readBodyCapped(resp: Response, cap: number): Promise<Uint8Array> {
+	if (!resp.body) return new Uint8Array(await resp.arrayBuffer()).slice(0, cap);
+	const reader = resp.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+	while (total < cap) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		if (value) { chunks.push(value); total += value.byteLength; }
+	}
+	if (total >= cap) { try { await reader.cancel(); } catch { /* already closed */ } }
+	const out = new Uint8Array(Math.min(total, cap));
+	let off = 0;
+	for (const c of chunks) {
+		const take = Math.min(c.byteLength, out.byteLength - off);
+		if (take <= 0) break;
+		out.set(c.subarray(0, take), off);
+		off += take;
+	}
+	return out;
+}
+
+/** 直连 HTTP + 零依赖 HTML→text（最底层兜底；导出供回归测试）。 */
+export async function fetchUrlDirect(rawUrl: string, maxChars = FETCH_DEFAULT_MAX_CHARS, timeoutMs = FETCH_HTTP_TIMEOUT): Promise<FetchResult> {
+	const t0 = Date.now();
+	const u = new URL(rawUrl);
+	if (u.protocol !== "http:" && u.protocol !== "https:") {
+		throw new Error(`unsupported URL scheme: ${u.protocol}（只支持 http/https）`);
+	}
+	const resp = await fetch(rawUrl, {
+		redirect: "follow",
+		signal: AbortSignal.timeout(timeoutMs),
+		headers: {
+			"user-agent": FETCH_UA,
+			accept: "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,application/json;q=0.8,*/*;q=0.5",
+		},
+	});
+	if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+	const ct = (resp.headers.get("content-type") || "").toLowerCase();
+	const raw = new TextDecoder("utf-8").decode(await readBodyCapped(resp, FETCH_MAX_BYTES));
+	let title = "";
+	let content = "";
+	let format: "markdown" | "text" = "text";
+	if (ct.includes("html") || ct.includes("xml")) {
+		const parsed = htmlToText(raw);
+		title = parsed.title;
+		content = parsed.text;
+	} else if (ct.startsWith("text/") || ct.includes("json")) {
+		content = raw.trim();
+		if (ct.includes("json")) {
+			try { content = JSON.stringify(JSON.parse(content), null, 2); } catch { /* keep raw */ }
+		}
+	} else {
+		throw new Error(`unsupported content-type: ${ct || "unknown"}`);
+	}
+	if (!content.trim()) throw new Error("empty content");
+	const tr = truncateContent(content, maxChars);
+	return {
+		url: rawUrl,
+		final_url: resp.url || rawUrl,
+		title,
+		content: tr.text,
+		content_format: format,
+		via: "direct",
+		http_status: resp.status,
+		truncated: tr.truncated,
+		elapsed_ms: Date.now() - t0,
+		meta: { content_type: ct },
+	};
+}
+
+async function fetchViaWigolo(wigolo: WigoloClient, url: string, maxChars: number): Promise<FetchResult> {
+	const t0 = Date.now();
+	const resp = await timeoutRace(
+		wigolo.callTool("fetch", { url, max_content_chars: maxChars, render_js: "auto" }),
+		FETCH_WIGOLO_TIMEOUT, "wigolo fetch",
+	);
+	const text = (resp.content ?? []).filter((c) => c.type === "text").map((c) => c.text).join("\n");
+	if (resp.isError) throw new Error(`wigolo fetch isError: ${text.slice(0, 200)}`);
+	const data = JSON.parse(text) as {
+		url?: string; title?: string; markdown?: string; metadata?: { title?: string };
+		cached?: boolean; fetch_method?: string; http_status?: number;
+		content_completeness?: { level?: string };
+	};
+	const rawMd = typeof data.markdown === "string" ? data.markdown : "";
+	if (!rawMd.trim()) throw new Error("wigolo fetch returned empty markdown");
+	const truncatedByProvider = /\[\.\.\. content truncated\]/i.test(rawMd);
+	const content = truncateContent(rawMd.replace(/\s*\[\.\.\. content truncated\]\s*$/i, "").trimEnd(), maxChars);
+	return {
+		url,
+		final_url: data.url || url,
+		title: data.title || data.metadata?.title || "",
+		content: content.text,
+		content_format: "markdown",
+		via: "wigolo",
+		http_status: typeof data.http_status === "number" ? data.http_status : null,
+		truncated: truncatedByProvider || content.truncated,
+		elapsed_ms: Date.now() - t0,
+		meta: { cached: data.cached === true, fetch_method: data.fetch_method, completeness: data.content_completeness?.level },
+	};
+}
+
+async function fetchViaKeenable(client: HTTPClient, url: string): Promise<FetchResult> {
+	const t0 = Date.now();
+	const resp = await timeoutRace(client.callTool("fetch_page_content", { url }), FETCH_HTTP_TIMEOUT, "keenable fetch");
+	const text = (resp.content ?? []).filter((c) => c.type === "text").map((c) => c.text).join("\n");
+	if (resp.isError) throw new Error(`keenable fetch isError: ${text.slice(0, 200)}`);
+	const m = text.match(/^Title:\s*(.*)\r?\nURL:\s*(\S+)\r?\n\r?\n([\s\S]*)$/);
+	const content = (m?.[3] ?? text).trim();
+	if (!content) throw new Error("keenable fetch returned empty content");
+	return {
+		url,
+		final_url: m?.[2] ?? url,
+		title: (m?.[1] ?? "").trim(),
+		content,
+		content_format: "markdown",
+		via: "keenable",
+		http_status: null,
+		truncated: false,
+		elapsed_ms: Date.now() - t0,
+		meta: {},
+	};
+}
+
+async function fetchViaTavily(client: HTTPClient, url: string): Promise<FetchResult> {
+	const t0 = Date.now();
+	const resp = await timeoutRace(
+		client.callTool("tavily_extract", { urls: [url], extract_depth: "basic" }),
+		FETCH_HTTP_TIMEOUT, "tavily extract",
+	);
+	const text = (resp.content ?? []).filter((c) => c.type === "text").map((c) => c.text).join("\n");
+	if (resp.isError) throw new Error(`tavily extract isError: ${text.slice(0, 200)}`);
+	const data = JSON.parse(text) as {
+		results?: Array<{ url?: string; title?: string; raw_content?: string }>;
+		failed_results?: Array<{ url?: string; error?: string }>;
+	};
+	const item = data.results?.[0];
+	const content = (item?.raw_content ?? "").trim();
+	if (!content) {
+		const why = (data.failed_results ?? []).map((f) => f.error).filter(Boolean).join("; ");
+		throw new Error(`tavily extract empty${why ? `: ${why.slice(0, 160)}` : ""}`);
+	}
+	return {
+		url,
+		final_url: item?.url || url,
+		title: item?.title || "",
+		content,
+		content_format: "markdown",
+		via: "tavily",
+		http_status: null,
+		truncated: false,
+		elapsed_ms: Date.now() - t0,
+		meta: {},
+	};
+}
+
+async function fetchViaSerper(client: SerperClient, url: string): Promise<FetchResult> {
+	const t0 = Date.now();
+	const r = await client.scrape(url, FETCH_HTTP_TIMEOUT);
+	const content = r.text.trim();
+	if (!content) throw new Error("serper scrape returned empty text");
+	return {
+		url,
+		final_url: url,
+		title: r.title,
+		content,
+		content_format: "text",
+		via: "serper",
+		http_status: null,
+		truncated: false,
+		elapsed_ms: Date.now() - t0,
+		meta: { credits: r.credits },
+	};
+}
+
+async function runFetch(input: FetchInput, deps: FetchDeps): Promise<FetchResult> {
+	const { url, maxChars } = normalizeFetchInput(input);
+	const t0 = Date.now();
+	const failed: string[] = [];
+	const keenableThrottled = !deps.keenableHasKey && isKeenableThrottled();
+	// SMART_WS_FETCH_SKIP=wigolo,keenable,... —— 仅用于验证/排障：强制走后面的层
+	const skipEnv = new Set((process.env.SMART_WS_FETCH_SKIP ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean));
+	const envSkip = (via: string): string | undefined => (skipEnv.has(via) ? "env skip" : undefined);
+	const attempts: Array<{ via: string; run: () => Promise<FetchResult>; skip?: string }> = [
+		{ via: "wigolo", run: () => fetchViaWigolo(deps.wigolo, url, maxChars), skip: envSkip("wigolo") },
+		{
+			via: "keenable",
+			run: () => fetchViaKeenable(deps.keenable as HTTPClient, url),
+			skip: envSkip("keenable") ?? (!deps.keenable ? "disabled" : (keenableThrottled ? "throttled" : undefined)),
+		},
+		{ via: "tavily", run: () => fetchViaTavily(deps.tavily as HTTPClient, url), skip: envSkip("tavily") ?? (deps.tavily ? undefined : "no key") },
+		{ via: "serper", run: () => fetchViaSerper(deps.serper as SerperClient, url), skip: envSkip("serper") ?? (deps.serper ? undefined : "no key") },
+		{ via: "direct", run: () => fetchUrlDirect(url, maxChars), skip: envSkip("direct") },
+	];
+	for (const a of attempts) {
+		if (a.skip) { failed.push(`${a.via}: skipped (${a.skip})`); continue; }
+		try {
+			const r = await a.run();
+			const tr = truncateContent(r.content, maxChars);
+			return {
+				...r,
+				url,
+				content: tr.text,
+				truncated: r.truncated || tr.truncated,
+				elapsed_ms: Date.now() - t0,
+				meta: { ...r.meta, tried: failed },
+			};
+		} catch (e) {
+			failed.push(`${a.via}: ${e instanceof Error ? e.message : String(e)}`);
+		}
+	}
+	throw new Error(`fetch failed: ${failed.join("; ")}`);
+}
+
+function renderFetchText(r: FetchResult): string {
+	const bits: string[] = [];
+	if (r.http_status) bits.push(`HTTP ${r.http_status}`);
+	if (r.meta.cached === true) bits.push("cached");
+	if (typeof r.meta.credits === "number") bits.push(`${r.meta.credits} credits`);
+	const via = bits.length ? `${r.via} (${bits.join(", ")})` : r.via;
+	return `Title: ${r.title || "(untitled)"}\nURL: ${r.final_url}\nVia: ${via} · ${r.elapsed_ms}ms\n\n${r.content}${r.truncated ? "\n\n[... content truncated]" : ""}`;
+}
+
+function renderFetchResult(r: FetchResult, outputFormat: "text" | "json"): string {
+	return outputFormat === "json" ? JSON.stringify(r, null, 2) : renderFetchText(r);
+}
+
+async function runCliFetch(params: FetchInput): Promise<{ text: string; details: FetchResult }> {
+	const input = normalizeFetchInput(params);
+	const clients = buildClientsForCli(loadSmartConfig());
+	const wigolo = new WigoloClient();
+	wigolo.warmup();
+	(process as any).__wigoloCli = wigolo;
+	const r = await runFetch(input, {
+		wigolo,
+		keenable: clients.keenable,
+		tavily: clients.tavily,
+		serper: clients.serper,
+		keenableHasKey: clients.keenableRes.key !== null,
+	});
+	return { text: renderFetchResult(r, input.outputFormat), details: r };
+}
+
 export { runCliSearch };
+export { runCliFetch };
 
 // ─── CLI 模式（模块顶层）：argv[2] 为 JSON 搜索参数 ────────
 // 由 smart-web-search-mcp-server.mjs 以 `node smart-web-search-mcp.ts '{...}'` spawn。
@@ -1393,221 +1769,16 @@ if (/(^|[\\/])smart-web-search-mcp\.[cm]?[jt]s$/.test(process.argv[1] ?? "") && 
 	// M3：stdout 是 CLI 的 JSON 协议通道——把 console.log 重定向 stderr，
 	// 防御未来给核心加模块顶层副作用（横幅/日志）污染 CLI stdout。
 	console.log = (...a: unknown[]) => { process.stderr.write(a.join(" ") + "\n"); };
-	runCliSearch(JSON.parse(process.argv[2]))
+	const cliArgs = JSON.parse(process.argv[2]) as Record<string, unknown>;
+	const cliRun = cliArgs?.action === "fetch"
+		? runCliFetch(cliArgs as unknown as FetchInput)
+		: runCliSearch(cliArgs as unknown as SearchInput);
+	cliRun
 		.then((out) => {
 			const wig = (process as any).__wigoloCli;
 			if (wig?.close) wig.close();
 			process.stdout.write(JSON.stringify(out));
 			process.exit(0);
 		})
-		.catch((e) => { process.stderr.write("CLI search failed: " + (e?.message ?? e) + "\n"); process.exit(1); });
-}
-
-export default function smartWebSearch(pi?: ExtensionAPI) {
-	// pi 模式：pi 为 undefined 且非 CLI（无 argv[2]）→ 裸 import 场景，不注册
-	if (pi === undefined) return;
-	const wigolo = new WigoloClient();
-	(process as any).__wigolo = wigolo;
-	// 优化1：注册时预热 wigolo stdio client（spawn+initialize 提前完成），
-	// 消除首次搜索最长 90s 冷启动对 MCP 客户端的超时感知。
-	wigolo.warmup();
-
-	// ─── Config hot-reload ─────────────────────────────────────
-	// Keys / provider toggles re-resolve on every execute() when the config file
-	// mtime changes — no pi restart needed. HTTP clients are stateless (one
-	// session header), so rebuilding is cheap; the wigolo stdio client is config-
-	// independent and stays a singleton. No fs.watch from the factory (per pi
-	// extension guidelines) — mtime is checked lazily per call instead.
-	function buildClients(smartCfg: SmartConfig) {
-		const tinyfishRes = resolveProviderKey("tinyfish", smartCfg);
-		const tavilyRes = resolveProviderKey("tavily", smartCfg);
-		const keenableRes = resolveKeenableConfig(smartCfg);
-		const serperRes = resolveSerperConfig(smartCfg);
-		return {
-			tinyfishRes, tavilyRes, keenableRes, serperRes,
-			tinyfish: tinyfishRes.enabled && tinyfishRes.key ? new HTTPClient(TINYFISH_REMOTE_MCP_URL, { "X-API-Key": tinyfishRes.key }, "tinyfish") : null,
-			tavily: tavilyRes.enabled && tavilyRes.key ? new HTTPClient(TAVILY_REMOTE_MCP_URL + "?tavilyApiKey=" + encodeURIComponent(tavilyRes.key), {}, "tavily") : null,
-			keenable: keenableRes.enabled
-				? new HTTPClient(KEENABLE_MCP_URL, keenableRes.key ? { "X-API-Key": keenableRes.key } : {}, "keenable",
-						keenableRes.key === null ? KEENABLE_THROTTLE_PATH : undefined)
-				: null,
-			serper: serperRes.enabled && serperRes.key ? new SerperClient(serperRes.key) : null,
-		};
-	}
-	function configMtime(): string {
-		try { return existsSync(SMART_CONFIG_PATH) ? String(statSync(SMART_CONFIG_PATH).mtimeMs) : "absent"; }
-		catch { return "absent"; }
-	}
-
-	let clients = buildClients(loadSmartConfig());
-	let clientsMtime = configMtime();
-	function ensureClients(): typeof clients {
-		const m = configMtime();
-		if (m !== clientsMtime) {
-			clientsMtime = m;
-			clients = buildClients(loadSmartConfig());
-			const c = clients;
-			const providers = providersSnapshot(c);
-			const line = `[smart_web_search] config hot-reloaded | L1 keenable: ${providers.keenable} | L2 tinyfish: ${providers.tinyfish} | L2 tavily: ${providers.tavily} | L3 serper: ${providers.serper}`;
-			console.log(line);
-			writeLog({ v: LOG_SCHEMA_V, ts: new Date().toISOString(), tool: "smart_web_search", via: viaTag("pi"), version: VERSION, event: "config_reload", providers });
-		}
-		return clients;
-	}
-
-	const c0 = clients;
-	console.log(`[smart_web_search] L1 wigolo: ready (free) | L1 keenable: ${providerLabel(c0.keenableRes, true)} | L2 tinyfish: ${providerLabel(c0.tinyfishRes)} | L2 tavily: ${providerLabel(c0.tavilyRes)} | L3 serper: ${providerLabel(c0.serperRes)} | config hot-reload: on`);
-
-	pi.registerTool({
-		name: "smart_web_search",
-		label: "Smart Web Search (5-provider)",
-		description:
-			"5-provider web search with cascade routing. L1 wigolo (free, 18 engines; requires `npm i -g wigolo`) + keenable (100K/mo free, independent index) in parallel → L2 tinyfish → tavily (serial; AI-optimized, 1000/mo free) → L3 serper (Google, 2500 free then paid). " +
-			"Returns search results + per-layer call chain. Detail field shows which layer answered and why others were skipped — use it to learn the routing behavior. " +
-			"Use this as the DEFAULT web search tool. Use individual wigolo_/tinyfish_/tavily_/keenable_/serper_ tools only when you specifically need a layer's unique capability.",
-		promptSnippet: "Smart 5-provider web search: wigolo+keenable → tinyfish→tavily → serper with cascade routing",
-		promptGuidelines: [
-			"Use smart_web_search as the default for any web search — it routes through 5 providers (wigolo+keenable L1 parallel, tinyfish→tavily L2, serper L3) and finds the best result.",
-			"Set intent=news for current events, intent=paper for academic, intent=code for github/repos, intent=research for deep investigation.",
-			"Pass include_domains to hard-filter (works across all layers).",
-		],
-		parameters: Type.Object({
-			query: Type.String({ description: "Search query", minLength: 1, maxLength: 2000 }),
-			max_results: Type.Optional(Type.Integer({ description: "Max results (default 5)", minimum: 1, maximum: 50 })),
-			intent: Type.Optional(
-				StringEnum(["general", "news", "paper", "code", "research"] as const, {
-					description: "Query intent — influences routing (general = auto-detect)",
-				})
-			),
-			recency: Type.Optional(
-				StringEnum(["day", "week", "month", "year"] as const, {
-					description: "Time filter (forwarded to all layers)",
-				})
-			),
-			include_domains: Type.Optional(Type.String({ description: "Comma-separated domain whitelist" })),
-			exclude_domains: Type.Optional(Type.String({ description: "Comma-separated domain blacklist" })),
-			depth: Type.Optional(
-				StringEnum(["basic", "advanced"] as const, {
-					description: "Search depth — basic=cheap, advanced=more thorough (basic recommended for smart_search)",
-				})
-			),
-			location: Type.Optional(Type.String({ description: "Geo bias (e.g. US, CN) — only honored if layer supports it" })),
-			output_format: Type.Optional(
-				StringEnum(["text", "json"] as const, {
-					description: "Output format: text (default) = readable result blocks; json = structured envelope (query/results/meta/chain)",
-				})
-			),
-		}),
-		async execute(_id, params) {
-			const input = params as SearchInput;
-			const t0 = Date.now();
-			const requestId = randomUUID();
-			const hints = inferHints(input.query, input.intent ?? null);
-			const maxResults = input.max_results ?? 5;
-			const depth = input.depth ?? "basic";
-			// Hot-reload checkpoint: rebuild clients if config file changed since last call
-			const c = ensureClients();
-			const { tinyfish, tavily, keenable, keenableRes, serper } = c;
-			const providers = providersSnapshot(c);
-
-			const chain: LayerCall[] = [];
-			const L1_TIMEOUT = 45_000;  // wigolo cold start + 18 engines（预算详见 CLI 路径注释）
-			const L1_KEENABLE_TIMEOUT = 15_000;  // keenable is instant HTTP, no cold start
-			// L2/L3 超时在共享 runL2L3 内定义
-
-			// ─── Decide layer plan ─────────────────────────────────────
-			// L2 is a serial pair (tinyfish -> tavily); L3 is serper (unconditional fallback).
-			let tryL1 = true, tryTinyfish = !!tinyfish, tryTavily = !!tavily;
-			const trySerper = !!serper;
-			// extractCrawl hint: tinyfish has no extract/crawl, so skip tinyfish (keep tavily)
-			if (hints.extractCrawl) tryTinyfish = false;
-			// newsMode: prefer tinyfish (it has good news) → skip L1, go straight to L2
-			if (hints.newsMode && tinyfish) { tryL1 = false; }
-			// paperMode: prefer tinyfish (has research_paper domain_type) → skip L1
-			if (hints.paperMode && tinyfish) { tryL1 = false; }
-
-			// ─── Layer 1（与 CLI 单源：runL1 / runL2L3 / pickAnswer）───────
-			// 各 provider 参数形态见 buildL1Params 注释；此处此前手抄一份且与 CLI 判据漂移。
-			const l1 = await runL1({
-				chain, wigolo, keenable, keenableHasKey: keenableRes.key !== null,
-				params: buildL1Params(input, hints, maxResults),
-				tryL1, maxResults, wigoloTimeout: L1_TIMEOUT, keenableTimeout: L1_KEENABLE_TIMEOUT,
-			});
-			const l1Sufficient = l1.sufficient;
-			const l1CombinedRaw = l1.combinedRaw;
-			const l1WigoloCall = l1.wigoloCall;
-
-			// ─── L2/L3 级联 ──
-			const l2l3 = await runL2L3({
-				chain, input, hints, depth, maxResults,
-				clients: { tinyfish, tavily, serper },
-				l1Sufficient, tryTinyfish, tryTavily, trySerper,
-			});
-			const l2Sufficient = l2l3.l2Sufficient;
-			const { stoppedAt, winner } = pickAnswer(chain, l1, l2l3);
-			// ─── Unified output: winner raw_text → items ──────────────
-			const outputFormat = input.output_format === "json" ? "json" : "text";
-			let items: UnifiedItem[] = [];
-			let rawCount = 0;
-			let dedupedCount = 0;
-			if (stoppedAt === 1) {
-				const merged = mergeL1Items(
-					normalizeProviderText("wigolo", l1WigoloCall.result.raw_text),
-					normalizeProviderText("keenable", l1.keenableCall.result.raw_text),
-					maxResults,
-				);
-				items = merged.items; rawCount = merged.rawCount; dedupedCount = merged.dedupedCount;
-			} else if (winner) {
-				const norm = normalizeProviderText(winner.provider, winner.result.raw_text);
-				dedupedCount = norm.length; rawCount = norm.length;
-				items = norm.slice(0, maxResults);
-			}
-			// normalize 失败（provider 改格式等）→ 回退 raw_text，不把有结果变无结果
-			const formatRaw = stoppedAt > 0 && items.length === 0;
-			const rawFallback = formatRaw
-				? (stoppedAt === 1 ? l1CombinedRaw : postFilterResults(winner?.result.raw_text ?? "", maxResults))
-				: "";
-			const winnerProvider = winner?.provider ?? "-";
-			const layersTried = chain
-				.filter((c) => c.result.status !== "skipped")
-				.map((c) => ({ provider: c.provider, status: c.result.status, count: c.result.result_count }));
-
-			// Total latency + credits
-			const totalLatency = chain.reduce((s, c) => s + c.result.latency_ms, 0);
-			const totalCredits = chain.reduce((s, c) => s + c.result.credits_used, 0);
-
-			// ─── Log ─────────────────────────────────────────────────
-			writeLog(buildSearchLogEntry({
-				via: "pi", requestId, t0, input, maxResults, depth, hints, chain,
-				stoppedAt, outputFormat, totalCredits, l1Sufficient, l2Sufficient,
-				l1Status: l1WigoloCall.result.status, providers,
-			}));
-
-			// ─── Return to LLM ───────────────────────────────────────
-			const textCtx: TextOutputCtx = {
-				stoppedAt, provider: winnerProvider, dedupedCount, rawCount,
-				layersTried, totalLatencyMs: totalLatency, formatRaw, rawFallback,
-			};
-			const content = outputFormat === "json"
-				? assembleEnvelope(input.query, items, chain, { stoppedAt, provider: winnerProvider, totalLatencyMs: totalLatency, totalCredits, dedupedCount })
-				: assembleTextOutput(items, textCtx);
-			return {
-				content: [{ type: "text", text: content }],
-				details: {
-					request_id: requestId,
-					stopped_at: stoppedAt,
-					chain: chain.map((c) => ({
-						layer: c.layer, provider: c.provider, tool: c.tool, status: c.result.status,
-						result_count: c.result.result_count, latency_ms: c.result.latency_ms,
-						credits_used: c.result.credits_used, error: c.result.error,
-					})),
-					total_latency_ms: totalLatency,
-					total_credits_used: totalCredits,
-				},
-			};
-		},
-	});
-
-	console.log(`[smart_web_search] Registered 1 tool: smart_web_search (5-provider cascade)`);
-	console.log(`[smart_web_search] Log: ${LOG_PATH}`);
+		.catch((e) => { process.stderr.write("CLI failed: " + (e?.message ?? e) + "\n"); process.exit(1); });
 }

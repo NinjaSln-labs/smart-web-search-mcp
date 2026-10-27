@@ -1,8 +1,8 @@
 """smart-web-search-install 一键安装器单元测试。
 
-覆盖：各家配置格式合并（cline/commandcode/opencode/mcode/zcode）、cursor Windows 桥接、幂等、
---force 覆盖、.bak 备份、dry-run 不落盘、CLI 调用适配器（mock，reasonix/qoder/pi）、pi 扩展→MCP 迁移、
-dsh patch 追加。用 monkeypatch 将 home() 指向 tmp_path，隔离用户真实配置。
+覆盖：各家配置格式合并（cline/commandcode/mcode/zcode）、cursor Windows 桥接、幂等、
+--force 覆盖、.bak 备份、dry-run 不落盘、CLI 调用适配器（mock，reasonix/qoder/pi/codex/claude/copilot）、
+pi 扩展→MCP 迁移、codex 旧名下划线兼容、dsh patch 追加。用 monkeypatch 将 home() 指向 tmp_path，隔离用户真实配置。
 """
 
 import json
@@ -278,6 +278,71 @@ def test_pi_migrates_legacy_extension(fake_home, monkeypatch):
     assert not ext.exists()  # 扩展已移除
     assert ext.with_name(ext.name + ".bak").read_text(encoding="utf-8") == "// legacy extension\n"
     assert "已卸载旧扩展" in r and "added smart-web-search" in r
+
+
+# ---------------------------------------------------------------- 新增 CLI 客户端（codex/claude/copilot）
+
+def _fake_cli(monkeypatch, runs, initial=()):
+    """伪 CLI：list 反映当前条目集合，add/remove 改集合——force 流程才有真实回读。"""
+    state = {"names": set(initial)}
+
+    def fake_run(args, timeout):
+        runs.append(list(args))
+        if "list" in args:
+            out = "\n".join(sorted(state["names"]))
+        elif "remove" in args:
+            state["names"].discard(args[-1])
+            out = "removed"
+        else:
+            state["names"].add(ai.SERVER_NAME)
+            out = f"added {ai.SERVER_NAME}"
+        return subprocess.CompletedProcess(args, 0, stdout=out, stderr="")
+
+    monkeypatch.setattr(ai, "_run", fake_run)
+    return state
+
+
+@pytest.mark.parametrize("cls,cli,add_args,remove_args", [
+    (ai.CodexInstaller, "codex", ["mcp", "add"], ["mcp", "remove"]),
+    (ai.ClaudeInstaller, "claude", ["mcp", "add", "--scope", "user"], ["mcp", "remove", "--scope", "user"]),
+    (ai.CopilotInstaller, "copilot", ["mcp", "add"], ["mcp", "remove"]),
+])
+def test_new_cli_clients_add_force_and_idempotent(fake_home, monkeypatch, cls, cli, add_args, remove_args):
+    inst = cls()
+    monkeypatch.setattr(ai, "_cli_exists", lambda *names: True)
+    runs = []
+    _fake_cli(monkeypatch, runs)
+
+    assert inst.entry_status() == "absent"
+    assert "已通过" in inst.install(force=False)
+    assert runs[-1] == [cli, *add_args, ai.SERVER_NAME, "--", *ai._server_command()]
+
+    assert inst.entry_status() == "exists"
+    assert "已存在" in inst.install(force=False)
+
+    runs.clear()
+    assert "已通过" in inst.install(force=True)
+    assert runs[-1] == [cli, *add_args, ai.SERVER_NAME, "--", *ai._server_command()]
+
+
+def test_codex_recognizes_legacy_underscore_entry(fake_home, monkeypatch):
+    """Codex 既有 smart_web_search（下划线）：不重复注册；--force 才迁移为规范名。"""
+    inst = ai.CodexInstaller()
+    monkeypatch.setattr(ai, "_cli_exists", lambda *names: True)
+    runs = []
+    state = _fake_cli(monkeypatch, runs, initial=("smart_web_search",))
+
+    assert inst.entry_status() == "exists"
+    r = inst.install(force=False)
+    assert "已存在" in r and "smart_web_search" in r
+    assert not any("add" in a for a in runs)  # 不新增条目
+
+    runs.clear()
+    r = inst.install(force=True)
+    assert "已通过" in r and "重写 config.toml" in r  # 写入前提示 codex 会重写整份配置
+    assert ["codex", "mcp", "remove", "smart_web_search"] in runs
+    assert runs[-1] == ["codex", "mcp", "add", ai.SERVER_NAME, "--", *ai._server_command()]
+    assert state["names"] == {ai.SERVER_NAME}
 
 
 # ---------------------------------------------------------------- main() 流程

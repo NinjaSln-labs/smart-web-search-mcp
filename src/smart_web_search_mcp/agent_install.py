@@ -3,8 +3,8 @@
 设计（镜像姊妹工具 docs-search 的 docs-search-install）：
 - 每家一个适配器（detect 检测是否已安装 / entry_status 查条目 / install 幂等写入）
 - 写入方式分三类：
-    JSON 直写（cline/opencode/mcode/commandcode/zcode——mcpServers 或 mcp.servers 映射合并）
-    CLI 调用（reasonix/qoder/pi——官方 CLI 管理 MCP，配置格式交给官方）
+    JSON 直写（cline/mcode/commandcode/zcode——mcpServers 或 mcp.servers 映射合并）
+    CLI 调用（reasonix/qoder/opencode/pi/codex/claude/copilot——官方 CLI 管理 MCP，配置格式交给官方）
     文件 patch（dsh——cordis.patch.yml insert 行追加）
     Windows 桥接（cursor——写 %USERPROFILE%\\.cursor\\mcp.json，经 wsl.exe 跑 WSL 里的 server）
 - 幂等：目标条目已存在时跳过（--force 覆盖）；覆盖前备份原文件（<file>.bak）
@@ -45,6 +45,9 @@ AGENTS = [
     "reasonix",
     "qoder",
     "dsh",
+    "codex",
+    "claude",
+    "copilot",
 ]
 
 AGENT_NAMES_ZH = {
@@ -58,6 +61,9 @@ AGENT_NAMES_ZH = {
     "reasonix": "Reasonix",
     "qoder": "Qoder（qodercn）",
     "dsh": "DSH",
+    "codex": "Codex CLI",
+    "claude": "Claude Code",
+    "copilot": "GitHub Copilot CLI",
 }
 
 
@@ -477,6 +483,77 @@ class PiInstaller(CliInstaller):
         return super().install(force) + migrated
 
 
+class ClaudeInstaller(CliInstaller):
+    """Claude Code：`claude mcp add --scope user`（默认 local 是项目级，user 才全局可用）。"""
+
+    name = "claude"
+    cli = "claude"
+    list_args = ("mcp", "list")
+    add_args = ("mcp", "add", "--scope", "user")
+    remove_args = ("mcp", "remove", "--scope", "user")
+
+    def describe(self) -> str:
+        return "Claude Code：claude mcp add --scope user（~/.claude.json）"
+
+
+class CopilotInstaller(CliInstaller):
+    """GitHub Copilot CLI：`copilot mcp add`（写 user 级 ~/.copilot/mcp-config.json）。"""
+
+    name = "copilot"
+    cli = "copilot"
+    list_args = ("mcp", "list")
+    add_args = ("mcp", "add")
+    remove_args = ("mcp", "remove")
+
+    def describe(self) -> str:
+        return "GitHub Copilot CLI：copilot mcp add（~/.copilot/mcp-config.json）"
+
+
+class CodexInstaller(CliInstaller):
+    """Codex CLI：`codex mcp add`（写 ~/.codex/config.toml 的 [mcp_servers.*]）。
+
+    兼容既有手工条目 `smart_web_search`（下划线）：识别为已存在 ⇒ 普通安装不重复注册；
+    `--force` 时才删除旧名并迁移为规范名 smart-web-search。
+    """
+
+    name = "codex"
+    cli = "codex"
+    list_args = ("mcp", "list")
+    add_args = ("mcp", "add")
+    remove_args = ("mcp", "remove")
+    legacy_names = ("smart_web_search",)
+
+    def describe(self) -> str:
+        return "Codex CLI：codex mcp add（~/.codex/config.toml；兼容旧名 smart_web_search）"
+
+    def entry_status(self) -> str:
+        if not self.detect():
+            return "absent"
+        try:
+            out = _run([self.cli, *self.list_args], timeout=60).stdout
+        except Exception:  # noqa: BLE001 -- CLI 异常按未检测处理
+            return "absent"
+        return "exists" if any(n in out for n in (SERVER_NAME, *self.legacy_names)) else "absent"
+
+    def install(self, force: bool) -> str:
+        status = self.entry_status()
+        if status == "exists" and not force:
+            return (f"已存在（{SERVER_NAME} 或旧名 {'/'.join(self.legacy_names)}；"
+                    f"--force 覆盖并迁移为规范名）")
+        if status == "exists" and force:
+            for n in (SERVER_NAME, *self.legacy_names):
+                try:
+                    _run([self.cli, *self.remove_args, n], timeout=60)
+                except Exception:  # noqa: BLE001 -- 旧名未必存在
+                    pass
+            if self.entry_status() == "exists":
+                return "无法移除旧条目（codex mcp remove 失败），未写入以免重复注册"
+        r = super().install(force)
+        if r.startswith("已通过"):
+            r += "；⚠ codex mcp 会整体重写 config.toml（注释/标记/顺序会丢），改前请备份"
+        return r
+
+
 # ---------------------------------------------------------------- 文件 patch 类
 
 def _split_top_level_blocks(text: str) -> list[str]:
@@ -580,7 +657,7 @@ class DshInstaller(BaseInstaller):
 INSTALLERS: dict[str, BaseInstaller] = {c.name: c for c in [
     PiInstaller(), CursorInstaller(), ClineInstaller(), OpenCodeInstaller(),
     McodeInstaller(), CommandCodeInstaller(), ZCodeInstaller(), ReasonixInstaller(),
-    QoderInstaller(), DshInstaller(),
+    QoderInstaller(), DshInstaller(), CodexInstaller(), ClaudeInstaller(), CopilotInstaller(),
 ]}
 
 
