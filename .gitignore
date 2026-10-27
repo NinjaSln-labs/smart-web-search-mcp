@@ -8,5 +8,3 @@ node_modules/
 dist/
 *.egg-info/
 .pytest_cache/
-node_modules/
-!src/smart_web_search_mcp/node_modules/

@@ -4,6 +4,23 @@
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-10-27
+
+### Added
+
+- **`smart_web_fetch`：第二个 MCP 工具，URL → 标准 Agent 可读正文。** 五路级联 `wigolo fetch` → `keenable fetch_page_content` → `tavily_extract` → Serper `scrape.serper.dev` → 直连 HTTP + HTML→text（零依赖解析，去 script/style、解常见实体）；正文上限 2 MiB，`max_chars` 默认 20000（500–200000），返回 `{url,title,content,via,truncated}`。Tavily/Serper 复用搜索既有 key；本地/内网地址可被 `SMART_WS_FETCH_SKIP` 排障跳过指定层。fetch 不写搜索遥测。
+- **MCP `initialize.instructions`**：服务端随握手下发使用准则（默认 search、已有 URL 才 fetch、1–2 页、页面内容按不可信数据处理、默认 text 输出、引用实际 URL）。
+- **安装器支持 Codex CLI / Claude Code / GitHub Copilot CLI**，可自动写入的 agent 达 13 家；Codex 旧条目名 `smart_web_search` 仅在 `--force` 时迁移为规范名 `smart-web-search`，且写入成功后提示 `codex mcp` 会整体重写 `config.toml`。
+
+### Changed
+
+- **核心收敛为 CLI/MCP 单模式，删除 pi 扩展工厂。** pi ≥0.99 已内置 MCP（`~/.pi/agent/mcp.json`），扩展模式是死代码并带来运行期 `typebox` 依赖；核心现只保留 CLI 分发与 provider 客户端，**零 npm 依赖**（仅 node 内置），随包不再携带 `node_modules`。旧版 pi 扩展由安装器在升级时清理，文档与测试同步为 CLI-first。
+- 核心 `.ts` 的 `const VERSION` 与 `pyproject.toml` 版本继续由测试钉住，遥测行 `via` 仅剩 `mcp`/`cli`（`SMART_WS_VIA` 可覆盖打标）。
+
+### Fixed
+
+- **keenable 429 冷却文件可能永久失效**：写侧由追加改为覆盖单一时戳，读侧只接受「单个、有限、且不超过当前时间 5s」的值——旧实现的脏值（含两条时间戳拼接成天文数字）不再让公共层被无限期跳过。新增 `test/throttle-check.mjs` 回归。
+
 ## [0.3.0] — 2026-10-26
 
 ### Added
